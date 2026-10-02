@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
-import {databaseState,snapshotStoppedHome,requireSafeBinaryRollback,installedCli} from './lib/ko-safety.mjs';
+import {databaseState,snapshotStoppedHome,requireSafeBinaryRollback,installedCli,parseMigrationReport} from './lib/ko-safety.mjs';
 import {nativeManage} from './lib/ko-deployment-native.mjs';
 test('rollback cannot replace binaries against a migrated live database',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-safety-'));
@@ -30,4 +30,10 @@ test('after initial Mac migration, idle checks use the selected CLI instead of t
   const target=path.join(root,'releases/new');
   fs.writeFileSync(path.join(root,'current.json'),JSON.stringify({target}));
   assert.deepEqual(installedCli(c),[c.node,path.join(target,'node_modules/t3/dist/bin.mjs')]);
+});
+test('upstream migration logging cannot hide or corrupt the final integrity report',()=>{
+  const report={applied:[[54,'migration']],events:[{count:141748}],integrity:[{integrity_check:'ok'}]};
+  assert.deepEqual(parseMigrationReport('INFO: Migrations ran successfully\n'+JSON.stringify(report)+'\n'),report);
+  assert.throws(()=>parseMigrationReport('INFO: success only'));
+  assert.throws(()=>parseMigrationReport(JSON.stringify({...report,integrity:[{integrity_check:'corrupt'}]})));
 });

@@ -70,6 +70,12 @@ export async function rehearseMigrations(c,target,safety) {
   if(!safety.before) return;
   verifyMigrationSource(c,target);
   const script=path.resolve(import.meta.dirname,'../rehearse-migrations.mjs');
-  const report=JSON.parse(run(c.node,[script,c.migrationSource,safety.backup],{timeout:120000}));
+  const report=parseMigrationReport(run(c.node,[script,c.migrationSource,safety.backup],{timeout:120000}));
   atomicJson(path.join(safety.backup,'migration-report.json'),report);
+}
+export function parseMigrationReport(stdout) {
+  // Upstream migration logging may precede our final one-line JSON result.
+  const report=JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
+  if(!Array.isArray(report.applied) || !Array.isArray(report.events) || !Array.isArray(report.integrity) || report.integrity.length!==1 || report.integrity[0].integrity_check!=='ok') throw Error('Migration worker did not report a valid integrity result');
+  return report;
 }
