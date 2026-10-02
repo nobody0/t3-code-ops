@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
-import {databaseState,snapshotStoppedHome,requireSafeBinaryRollback} from './lib/ko-safety.mjs';
+import {databaseState,snapshotStoppedHome,requireSafeBinaryRollback,installedCli} from './lib/ko-safety.mjs';
 import {nativeManage} from './lib/ko-deployment-native.mjs';
 test('rollback cannot replace binaries against a migrated live database',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-safety-'));
@@ -21,4 +21,13 @@ test('rollback cannot replace binaries against a migrated live database',async t
   let restored=false;
   await assert.rejects(nativeManage(c,'rollback',undefined,{adapter:{restore:()=>{restored=true;}}}),/binary-only rollback is disabled/);
   assert.equal(restored,false);
+});
+test('after initial Mac migration, idle checks use the selected CLI instead of the old fallback',t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-cli-selection-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const c={root,platform:'darwin',node:process.execPath,initialCli:['old-node','old-cli']};
+  assert.deepEqual(installedCli(c),c.initialCli);
+  const target=path.join(root,'releases/new');
+  fs.writeFileSync(path.join(root,'current.json'),JSON.stringify({target}));
+  assert.deepEqual(installedCli(c),[c.node,path.join(target,'node_modules/t3/dist/bin.mjs')]);
 });

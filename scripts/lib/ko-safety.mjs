@@ -19,14 +19,19 @@ export function databaseState(baseDir) {
 export async function assertIdle(c) {
   if (!fs.existsSync(path.join(c.baseDir,'userdata/state.sqlite'))) return;
   const environmentId=fs.readFileSync(path.join(c.baseDir,'userdata/environment-id'),'utf8').trim();
-  let argv=c.initialCli;
-  if(!argv) {
-    const current=c.platform && c.platform!=='linux' ? JSON.parse(fs.readFileSync(path.join(c.root,'current.json'),'utf8')).target : fs.realpathSync(path.join(c.root,'current'));
-    argv=[c.node,path.join(current,'node_modules/t3/dist/bin.mjs')];
-  }
+  const argv=installedCli(c);
   const helper=path.resolve(import.meta.dirname,'../ko-session.mjs');
   const result=JSON.parse(run(c.node,[helper,'idle','--home-dir',c.baseDir,'--origin',`http://127.0.0.1:${c.port}`,'--environment-id',environmentId,'--t3-command',JSON.stringify(argv)]));
   if(result.status!=='idle') throw Error('Machine is busy or idle inspection failed; defer activation.');
+}
+export function installedCli(c) {
+  const selection=path.join(c.root,c.platform && c.platform!=='linux'?'current.json':'current');
+  if(fs.existsSync(selection)) {
+    const target=c.platform && c.platform!=='linux'?JSON.parse(fs.readFileSync(selection,'utf8')).target:fs.realpathSync(selection);
+    return [c.node,path.join(target,'node_modules/t3/dist/bin.mjs')];
+  }
+  if(Array.isArray(c.initialCli) && c.initialCli.length && c.initialCli.every(x=>typeof x==='string' && x)) return c.initialCli;
+  throw Error('No selected runtime; configure the verified initial CLI argv for first migration.');
 }
 export function snapshotStoppedHome(c, previous) {
   const state=databaseState(c.baseDir);
