@@ -8,6 +8,8 @@ The `Prepare stable T3 candidate` workflow merges the newest stable upstream rel
 
 Candidate IDs contain both source and operations commits. Unchanged successful candidates are not rebuilt. Four-hour checks refresh `maintenance-status/latest.json`. Schedule delays and outages are represented by timestamps. Workflows never connect to production machines. `T3_FORK_DEPLOY_KEY` is a dedicated write deploy key for the fork only; the build jobs never receive it.
 
+GitHub can disable public-repository schedules after 60 days without repository activity. The observer marks preparation stale after eight hours instead of showing a false all-clear. If disabled, an agent re-enables `prepare.yml` and starts a check. See [GitHub's scheduling rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
 `scripts/build-ko-release.mjs SOURCE OUTPUT` requires a clean published source; `T3_SOURCE_REF` selects an explicit candidate ref. The compatibility helper still ships at `node_modules/t3/dist/ko-session.mjs`. The maintained copy is separately installed at `tools/scripts/ko-session.mjs` under each deployment root.
 
 ## Agent rollout

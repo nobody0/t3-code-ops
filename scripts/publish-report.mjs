@@ -30,8 +30,18 @@ if(process.env.BUILD_REQUIRED==='true') {
     atomicJson('work/test-report.json',{sourceCommit:m.commit,opsCommit:m.opsCommit,platforms:keys,checks:['ops-tests','guard-tests','build','locked-install','native-terminal','isolated-startup'],workflow:report.reportUrl});
     const tag=m.releaseId;
     const exists=(()=>{try {gh(['release','view',tag,'--repo',repo]);return true;}catch{return false;}})();
+    let publishedHash=digest(archive);
     if(!exists) gh(['release','create',tag,archive,path.join(root,'release.json'),'work/test-report.json','--repo',repo,'--prerelease','--target',m.opsCommit,'--title',`Prepared T3 ${m.version}`,'--notes',`Tested candidate ${m.commit}. Agent approval and target migration rehearsal are required before activation.`]);
-    Object.assign(report,{status:'ready',releaseId:m.releaseId,version:m.version,sourceCommit:m.commit,archiveSha256:digest(archive),platforms:keys,releaseUrl:`https://github.com/${repo}/releases/tag/${tag}`});
+    else {
+      fs.mkdirSync('work/existing',{recursive:true});
+      gh(['release','download',tag,'--repo',repo,'--pattern','release.json','--pattern',path.basename(archive),'--dir','work/existing','--clobber']);
+      const existing=readJson('work/existing/release.json');
+      if(JSON.stringify(existing)!==JSON.stringify(manifest)) {
+        report.status='failed';report.error='Immutable release already exists with different build or locks; change the operations revision before preparing again.';
+      }
+      publishedHash=digest(path.join('work/existing',path.basename(archive)));
+    }
+    if(report.status!=='failed') Object.assign(report,{status:'ready',releaseId:m.releaseId,version:m.version,sourceCommit:m.commit,archiveSha256:publishedHash,platforms:keys,releaseUrl:`https://github.com/${repo}/releases/tag/${tag}`});
   }
 }
 report.checkedAt=new Date().toISOString();

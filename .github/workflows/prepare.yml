@@ -16,6 +16,8 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     outputs:
       build: ${{ steps.prepare.outputs.build }}
       source_ref: ${{ steps.prepare.outputs.source_ref }}
@@ -39,6 +41,11 @@ jobs:
           GIT_SSH_COMMAND: ssh -i ~/.ssh/t3-fork -o IdentitiesOnly=yes
           FORCE_PREPARE: ${{ inputs.force }}
         run: node scripts/prepare.mjs
+      - name: Publish current preparation state
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-report.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

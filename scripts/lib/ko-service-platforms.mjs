@@ -210,7 +210,7 @@ export function platformAdapter(c) {
   const getChild = `$child=$null; if(Test-Path -LiteralPath ${runtime}){ $r=Get-Content -Raw -LiteralPath ${runtime}|ConvertFrom-Json; $candidate=Get-Process -Id $r.pid -ErrorAction SilentlyContinue; if($candidate -and $candidate.Path -eq $r.executable -and $candidate.StartTime.ToUniversalTime().ToString('o') -eq $r.started){$child=$candidate} };`;
   function stop() {
     powershell(
-      `${getTask}${getChild} if($task){ Stop-ScheduledTask -TaskPath '\\' -TaskName ${task} }; if($child){ Stop-Process -Id $child.Id -ErrorAction SilentlyContinue; $child.WaitForExit(10000)|Out-Null };`,
+      `${getTask}${getChild} if($task){ Stop-ScheduledTask -TaskPath '\\' -TaskName ${task} }; if($child -and -not $child.HasExited){ $child.Kill(); $child.WaitForExit(10000)|Out-Null };`,
     );
   }
   function register(definition) {

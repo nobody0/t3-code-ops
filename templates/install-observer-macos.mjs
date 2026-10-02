@@ -12,6 +12,7 @@ const file=path.join(os.homedir(),'Library/LaunchAgents',label+'.plist');
 const argv=[process.execPath,path.join(ops,'scripts/observe.mjs'),config];
 const plist=`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array>${argv.map(x=>`<string>${escape(x)}</string>`).join('')}</array><key>RunAtLoad</key><true/><key>StartInterval</key><integer>300</integer><key>StandardOutPath</key><string>${escape(path.join(path.dirname(config),'observer.log'))}</string><key>StandardErrorPath</key><string>${escape(path.join(path.dirname(config),'observer-error.log'))}</string></dict></plist>`;
 const domain=`gui/${process.getuid()}`;
-try{execFileSync('launchctl',['print',`${domain}/${label}`],{stdio:'ignore'});execFileSync('launchctl',['bootout',`${domain}/${label}`]);}catch{}
+let loaded=false;try{execFileSync('launchctl',['print',`${domain}/${label}`],{stdio:'ignore'});loaded=true;}catch{}
+if(loaded) execFileSync('launchctl',['bootout',`${domain}/${label}`]);
 fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,plist,{mode:0o600});
 execFileSync('launchctl',['bootstrap',domain,file]);

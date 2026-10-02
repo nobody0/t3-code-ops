@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
+import net from 'node:net';
 import {run,atomicJson} from './ko-release.mjs';
 
 export function databaseState(baseDir) {
@@ -37,6 +38,15 @@ export function snapshotStoppedHome(c, previous) {
   }
   atomicJson(path.join(backup,'recovery.json'),{createdAt:new Date().toISOString(),baseDir:c.baseDir,previous,state});
   return {backup,before:state};
+}
+export async function assertStopped(c) {
+  await new Promise((resolve,reject)=>{
+    const socket=net.connect({host:'127.0.0.1',port:c.port});
+    socket.setTimeout(2000);
+    socket.once('connect',()=>{socket.destroy();reject(Error('T3 port is still listening; stopped-home backup refused.'));});
+    socket.once('timeout',()=>{socket.destroy();reject(Error('Could not establish that T3 stopped.'));});
+    socket.once('error',e=>{socket.destroy();if(e.code==='ECONNREFUSED')resolve();else reject(e);});
+  });
 }
 export function requireSafeBinaryRollback(c,journal) {
   if (fs.existsSync(path.join(c.baseDir,'userdata/state.sqlite')))

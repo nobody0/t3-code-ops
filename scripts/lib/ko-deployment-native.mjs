@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, verifyInstalled } from "./ko-release.mjs";
 import { platformAdapter, optionalFile } from "./ko-service-platforms.mjs";
-import {assertIdle,snapshotStoppedHome,databaseState,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource} from './ko-safety.mjs';
+import {assertIdle,snapshotStoppedHome,databaseState,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
 
 const journalPath = (c) => NodePath.join(c.root, "activation.json");
 const selectionPath = (c) => NodePath.join(c.root, "current.json");
@@ -157,6 +157,7 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
         await assertIdle(c);
         adapter.stop();
         if(adapter.info().state==='active') throw new Error('Service did not stop; backup refused.');
+        await assertStopped(c);
         journal.safety=snapshotStoppedHome(c,previous);
         atomicJson(journalPath(c),journal);
         await rehearseMigrations(c,target,journal.safety);
