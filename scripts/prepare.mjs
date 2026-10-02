@@ -5,10 +5,11 @@ const ops=git(['rev-parse','HEAD']);
 const latest=await github('/repos/pingdotgg/t3code/releases/latest');
 if(latest.draft || latest.prerelease || !/^v\d+\.\d+\.\d+$/.test(latest.tag_name)) throw Error('Expected a stable upstream release');
 const tag=latest.tag_name;
+const forkBaseCommit=(await github('/repos/nobody0/t3code/commits/main')).sha;
 let previous;
 try { const r=await fetch('https://github.com/nobody0/t3-code-ops/releases/download/maintenance-status/latest.json'); if(r.ok) previous=await r.json(); } catch {}
-const unchanged=previous?.upstreamTag===tag && previous?.opsCommit===ops && previous?.status==='ready' && process.env.FORCE_PREPARE!=='true';
-const report={schemaVersion:1,checkedAt:new Date().toISOString(),upstreamTag:tag,upstreamUrl:latest.html_url,opsCommit:ops,status:'preparing',reportUrl:`https://github.com/nobody0/t3-code-ops/actions/runs/${process.env.GITHUB_RUN_ID}`};
+const unchanged=previous?.upstreamTag===tag && previous?.opsCommit===ops && [previous?.forkBaseCommit,previous?.sourceCommit].includes(forkBaseCommit) && previous?.status==='ready' && process.env.FORCE_PREPARE!=='true';
+const report={schemaVersion:1,checkedAt:new Date().toISOString(),upstreamTag:tag,upstreamUrl:latest.html_url,opsCommit:ops,forkBaseCommit,status:'preparing',reportUrl:`https://github.com/nobody0/t3-code-ops/actions/runs/${process.env.GITHUB_RUN_ID}`};
 function output(name,value) {if(process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT,`${name}=${value}\n`);}
 fs.mkdirSync('work',{recursive:true});
 if(unchanged) {
@@ -16,7 +17,7 @@ if(unchanged) {
   output('build','false');
 } else {
   try {
-    const branch=`candidate/${tag}-${ops.slice(0,12)}`;
+    const branch=`candidate/${tag}-${forkBaseCommit.slice(0,12)}-${ops.slice(0,12)}`;
     const fork='https://github.com/nobody0/t3code.git';
     const exists=git(['ls-remote',fork,`refs/heads/${branch}`]);
     const source=path.resolve('work/source');
