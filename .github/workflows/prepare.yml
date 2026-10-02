@@ -1,0 +1,140 @@
+name: Prepare stable T3 candidate
+on:
+  schedule:
+    - cron: '17 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Recheck an unchanged candidate
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: prepare-stable
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.prepare.outputs.build }}
+      source_ref: ${{ steps.prepare.outputs.source_ref }}
+      commit: ${{ steps.prepare.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - name: Configure fork repository access
+        env:
+          CANDIDATE_KEY: ${{ secrets.T3_FORK_DEPLOY_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$CANDIDATE_KEY" > ~/.ssh/t3-fork
+          chmod 600 ~/.ssh/t3-fork
+          curl --fail --silent https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+      - id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/t3-fork -o IdentitiesOnly=yes
+          FORCE_PREPARE: ${{ inputs.force }}
+        run: node scripts/prepare.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preparation-report
+          path: work/report.json
+      - if: always()
+        run: rm -f ~/.ssh/t3-fork
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: nobody0/t3code
+          ref: ${{ needs.prepare.outputs.commit }}
+          path: work/source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - run: npm install -g corepack@0.35.0
+      - run: node --test scripts/*.test.mjs
+      - working-directory: work/source
+        run: corepack pnpm --filter @t3tools/monorepo --filter @t3tools/web... --filter t3... --filter @t3tools/scripts... --filter @t3tools/oxlint-plugin-t3code... install --frozen-lockfile
+      - name: Verify ownership guards
+        working-directory: work/source
+        run: node node_modules/vite-plus/bin/vp test run apps/server/src/cli/update.test.ts apps/server/src/cloud/bootService.test.ts apps/server/src/cloud/selfUpdate.test.ts
+      - name: Build the published candidate
+        env:
+          T3_SOURCE_REF: ${{ needs.prepare.outputs.source_ref }}
+        run: node scripts/build-ko-release.mjs work/source release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime
+          path: |
+            release/*/t3-code.tgz
+            release/*/release.json
+  platform:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime
+          path: work/download
+      - name: Validate native dependencies and startup
+        shell: bash
+        run: |
+          node --test scripts/ko-node-pty.test.mjs scripts/ko-native-service.test.mjs
+          node scripts/lock-platform.mjs "$(dirname "$(find work/download -name release.json -print -quit)")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locks-${{ matrix.os }}
+          path: work/platform-locks/
+  publish:
+    if: always()
+    needs: [prepare, build, platform]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - uses: actions/download-artifact@v4
+        with:
+          name: preparation-report
+          path: work
+      - uses: actions/download-artifact@v4
+        if: needs.platform.result == 'success'
+        with:
+          name: runtime
+          path: work/download
+      - if: needs.platform.result == 'success'
+        run: |
+          mkdir -p work/artifact
+          cp work/download/*/t3-code.tgz work/download/*/release.json work/artifact/
+      - uses: actions/download-artifact@v4
+        if: needs.platform.result == 'success'
+        with:
+          pattern: locks-*
+          merge-multiple: true
+          path: work/artifact/locks
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_REQUIRED: ${{ needs.prepare.outputs.build }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PLATFORM_RESULT: ${{ needs.platform.result }}
+        run: node scripts/publish-report.mjs

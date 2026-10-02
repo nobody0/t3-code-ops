@@ -1,0 +1,40 @@
+<p>Maintenance for [[t3-code]]. [[t3-code-remote-environments]] owns fleet access; [[t3-code-ops]] owns preparation and recovery. Stable updates are prepared every four hours. An agent performs updates after your approval.</p>
+<p><a href="https://capsncollars-t3.tailc8790e.ts.net/">Open T3 Code</a> · <a href="https://github.com/nobody0/t3-code-ops/actions">Preparation reports</a></p>
+<div id="t3-maintenance-status" role="status">Checking the local maintenance observation…</div>
+<div id="t3-maintenance-fleet"></div>
+<p id="t3-maintenance-freshness"></p>
+<p><button id="t3-maintenance-copy" type="button">Copy request for an agent</button> <button id="t3-maintenance-dismiss" type="button">Dismiss this candidate reminder</button> <button id="t3-maintenance-refresh" type="button">Refresh observation</button></p>
+<textarea id="t3-maintenance-request" rows="6" readonly aria-label="Request to copy into an agent conversation"></textarea>
+<p>Checks do not install updates. An offline machine stays pending until an agent updates it. Session credentials retain upstream’s 30-day lifetime. A saved connection does not extend credential validity.</p>
+<p>This page reads a local observation, refreshed at login and every five minutes. If KO is unavailable, start its documented <code>bun dev</code> wrapper. Missing or stale observations mean unknown status.</p>
+<script>
+(() => {
+  const get=id=>document.getElementById('t3-maintenance-'+id);
+  const key='t3-maintenance:dismissed';
+  let candidate=null;
+  const age=t=>Date.now()-Date.parse(t);
+  async function refresh() {
+    try {
+      const data=JSON.parse(await ko.readText('.cache/t3-maintenance/status.json'));
+      if(data.schemaVersion!==1 || !Array.isArray(data.machines)) throw Error('Invalid observation');
+      const p=data.preparation, stale=!Number.isFinite(age(data.checkedAt)) || age(data.checkedAt)>600000;
+      const prepStale=!p || !Number.isFinite(age(p.checkedAt)) || age(p.checkedAt)>28800000;
+      candidate=p?.releaseId ?? null;
+      let dismissed=false;try {dismissed=!!candidate && localStorage.getItem(key)===candidate;}catch{}
+      const pending=data.machines.filter(m=>!candidate || m.verifiedRelease!==candidate);
+      get('status').textContent=stale ? 'Observation is stale. Current fleet status is unknown.' : data.preparationError ? 'Could not refresh preparation status: '+data.preparationError : prepStale ? 'Preparation status is missing or stale.' : p.status==='ready' ? (pending.length ? 'Tested candidate '+candidate+' is ready for agent review.'+(dismissed?' Reminder dismissed for this candidate.':'') : 'All recorded deployments match the tested candidate.') : 'Preparation: '+p.status+(p.error?' — '+p.error:'');
+      const table=document.createElement('table');
+      const header=table.insertRow();for(const title of ['Machine','Observed version','Reachability','Last verified release']) {const th=document.createElement('th');th.textContent=title;header.append(th);}
+      for(const m of data.machines) {const row=table.insertRow();for(const value of [m.label??m.id,m.observedVersion??'Unknown',stale?'Unknown (stale)':m.reachable?'Reachable':'Unreachable / pending',m.verifiedRelease??'Not verified']) row.insertCell().textContent=value;}
+      get('fleet').replaceChildren(table);
+      get('freshness').textContent='Fleet checked: '+data.checkedAt+'. Preparation checked: '+(p?.checkedAt??'unknown')+'. Observed versions do not prove the installed commit.';
+      get('request').value=p?.status==='ready' && !prepStale && !data.preparationError ? 'Review and deploy T3 candidate '+candidate+' (source '+p.sourceCommit+'), following the t3-code-ops runbook and KO fleet documentation. Report: '+p.releaseUrl+'. Verify checksums and migration recovery, defer busy/offline machines, and update Klarstand, Windows, then Caps. Pending recorded machines: '+pending.map(m=>m.label??m.id).join(', ')+'. Include Mac only when reachable. Do not change authentication lifetime.' : 'Review T3 maintenance preparation and pending fleet updates. The KO maintenance note reports missing, stale or failed preparation; diagnose it before proposing or installing a candidate. Mac catch-up remains agent-run.';
+    } catch(e) {get('status').textContent='Maintenance status unknown: '+e.message;get('fleet').replaceChildren();get('request').value='Check the external T3 maintenance observer and preparation report before updating any machine.';}
+  }
+  get('copy').onclick=async()=>{try {await navigator.clipboard.writeText(get('request').value);}catch {get('request').focus();get('request').select();}};
+  get('dismiss').onclick=()=>{if(candidate){try {localStorage.setItem(key,candidate);}catch{get('status').textContent='Browser storage is unavailable; dismissal could not be saved.';return;}void refresh();}};
+  get('refresh').onclick=refresh;
+  void refresh();const timer=setInterval(()=>{if(!document.hidden) void refresh();},60000);
+  window.addEventListener('pagehide',()=>clearInterval(timer),{once:true});
+})();
+</script>
