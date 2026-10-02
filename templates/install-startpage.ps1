@@ -23,7 +23,7 @@ if(-not `$ready){
   Start-Process -FilePath $(& $quote $Bun) -ArgumentList 'dev' -WorkingDirectory $(& $quote $KoRoot) -WindowStyle Hidden
   for(`$attempt=0;`$attempt -lt 15;`$attempt++){try {Invoke-RestMethod 'http://localhost:4321/api/health' -TimeoutSec 2|Out-Null;break}catch {Start-Sleep -Seconds 2}}
 }
-Start-Process -FilePath $(& $quote $Firefox) -ArgumentList @('-new-tab',$(& $quote $url)) -WindowStyle Hidden
+Start-Process -FilePath $(& $quote $Firefox) -ArgumentList @('-new-tab',$(& $quote $url)) -WindowStyle Normal
 "@
 [IO.File]::WriteAllText($launch,$body.Replace("`r`n","`n"),(New-Object Text.UTF8Encoding($false)))
 $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$launch+'"')

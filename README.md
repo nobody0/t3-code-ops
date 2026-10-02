@@ -36,6 +36,8 @@ If an activation with a real database fails, the manager attempts to stop the ca
 
 Configure the note as a Firefox home/startup tab without disabling session restore. `templates/install-observer.ps1` installs the hidden Windows login task; the Mac launch-agent equivalent is installed by the agent when that machine returns. The note offers only permanent links and a copyable agent request. KO remains documentation, not a job dispatcher.
 
+For the Mac, run `node templates/install-observer-macos.mjs CONFIG.local.json`, then `node templates/install-startpage-macos.mjs FIREFOX_PROFILE KO_ROOT BUN_PATH`. The second command writes the homepage preference and a login LaunchAgent without opening the browser during setup. It preserves session restore. Keep the KO observer cache machine-local and publish the note through that machine's running KO API.
+
 ## Checks
 
 Run `node --test scripts/*.test.mjs`. For actual native supervision fixtures set `KO_TEST_NATIVE=1` on Windows/macOS or `KO_TEST_SYSTEMD=1` on Linux; these use disposable service names and homes. Never point tests at production data. Review Node, provider CLIs, Tailscale and NixOS upgrades separately.
