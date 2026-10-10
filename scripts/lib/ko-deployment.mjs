@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, run, verifyInstalled } from "./ko-release.mjs";
 import { nativeManage, nativeStatus, nativeRecovery } from "./ko-deployment-native.mjs";
+import {ensureSupervisor,renderSystemdOverride} from './ko-service-platforms.mjs';
 import {assertIdle,snapshotStoppedHome,databaseState,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
 
 export function loadConfig(path) {
@@ -291,10 +292,10 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
         await rehearseMigrations(c,target,journal.safety);
       }
       setCurrent(c, target);
-      const quote = (value) => '"' + value.replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
+      ensureSupervisor(c);
       writeOverride(
         c,
-        `[Service]\nUnsetEnvironment=T3_BOOT_SERVICE_UNIT T3_SERVICE_LAUNCHER_CONTEXT\nEnvironment=T3_KO_MANAGED=1\nExecStart=\nExecStart=${[c.node, NodePath.join(currentPath(c), "node_modules/t3/dist/bin.mjs"), "serve", "--host", "127.0.0.1", "--port", String(c.port), "--base-dir", c.baseDir].map(quote).join(" ")}\n`,
+        renderSystemdOverride(c,target),
       );
       run("systemctl", ["--user", "daemon-reload"]);
       control(c, "restart");

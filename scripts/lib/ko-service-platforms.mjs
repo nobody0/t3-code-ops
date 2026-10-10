@@ -11,7 +11,7 @@ const xml = (value) =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
-export const nativeArgs = (c, target) => [
+export const appArgs = (c, target) => [
   NodePath.join(target, "node_modules/t3/dist/bin.mjs"),
   "serve",
   "--host",
@@ -21,6 +21,25 @@ export const nativeArgs = (c, target) => [
   "--base-dir",
   c.baseDir,
 ];
+export const nativeArgs = (c, target) => [
+  NodePath.join(c.root, "tools/scripts/serve-t3.mjs"),
+  NodePath.join(c.root, "config.json"),
+  target,
+];
+export function ensureSupervisor(c) {
+  const config = NodePath.join(c.root, "config.json");
+  if (!NodeFS.existsSync(config)) writeFile(config, JSON.stringify(c, null, 2) + "\n");
+  for (const name of ["serve-t3.mjs", "lib/service-monitor.mjs"]) {
+    const source = NodePath.resolve(import.meta.dirname, "..", name);
+    const destination = NodePath.join(c.root, "tools/scripts", name);
+    if (NodePath.resolve(source) !== NodePath.resolve(destination))
+      writeFile(destination, NodeFS.readFileSync(source, "utf8"));
+  }
+}
+export function renderSystemdOverride(c, target) {
+  const quote = (value) => '"' + value.replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
+  return `[Service]\nUnsetEnvironment=T3_BOOT_SERVICE_UNIT T3_SERVICE_LAUNCHER_CONTEXT\nEnvironment=T3_KO_MANAGED=1\nRestart=always\nRestartSec=5\nKillMode=control-group\nExecStart=\nExecStart=${[c.node, ...nativeArgs(c, target)].map(quote).join(" ")}\n`;
+}
 export function windowsArgument(value) {
   return (
     '"' +
@@ -68,6 +87,7 @@ export function renderLaunchd(c, target, previous = {}) {
     ProgramArguments: [c.node, ...nativeArgs(c, target)],
     RunAtLoad: true,
     KeepAlive: true,
+    AbandonProcessGroup: false,
     StandardOutPath: previous.StandardOutPath ?? NodePath.join(c.root, "service.stdout.log"),
     StandardErrorPath: previous.StandardErrorPath ?? NodePath.join(c.root, "service.stderr.log"),
   };
@@ -104,8 +124,10 @@ $child = New-Object System.Diagnostics.Process
 $child.StartInfo = $psi
 $stdout = [IO.File]::Open(${psQuote(NodePath.join(c.root, "service.stdout.log"))}, 'Append', 'Write', 'ReadWrite')
 $stderr = [IO.File]::Open(${psQuote(NodePath.join(c.root, "service.stderr.log"))}, 'Append', 'Write', 'ReadWrite')
+$started = $false
 try {
   if (-not $child.Start()) { throw 'T3 process did not start.' }
+  $started = $true
   @{ pid = $child.Id; started = $child.StartTime.ToUniversalTime().ToString('o'); executable = $nodePath } | ConvertTo-Json -Compress | Set-Content -LiteralPath $runtimePath -Encoding UTF8
   $outCopy = $child.StandardOutput.BaseStream.CopyToAsync($stdout)
   $errCopy = $child.StandardError.BaseStream.CopyToAsync($stderr)
@@ -113,7 +135,20 @@ try {
   $outCopy.GetAwaiter().GetResult()
   $errCopy.GetAwaiter().GetResult()
   $result = $child.ExitCode
-} finally { $stdout.Dispose(); $stderr.Dispose() }
+} finally {
+  # If the wrapper was killed abruptly, clean only its verified app child tree.
+  $ownedRuntime = ${psQuote(NodePath.join(c.root, "service-runtime.json"))}
+  if ($started -and $child.HasExited -and (Test-Path -LiteralPath $ownedRuntime)) {
+    $owned = Get-Content -Raw -LiteralPath $ownedRuntime | ConvertFrom-Json
+    if ($owned.pid -eq $child.Id -and $owned.childPid) {
+      $app = Get-CimInstance Win32_Process -Filter "ProcessId=$($owned.childPid)" -ErrorAction SilentlyContinue
+      if ($app -and $app.ParentProcessId -eq $child.Id -and $app.ExecutablePath -eq $nodePath -and $app.CommandLine.Contains(${psQuote(NodePath.join(target, "node_modules/t3/dist/bin.mjs"))})) {
+        & taskkill.exe /PID $app.ProcessId /T /F | Out-Null
+      }
+    }
+  }
+  $stdout.Dispose(); $stderr.Dispose()
+}
 # A server exit, including a clean unexpected exit, asks Task Scheduler to recover.
 if ($result -eq 0) { exit 1 }
 exit $result
@@ -138,7 +173,7 @@ export function renderWindowsTask(c, scriptPath, sid) {
     .join(" ");
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(sid)}</UserId></LogonTrigger></Triggers>
+<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(sid)}</UserId></LogonTrigger><CalendarTrigger><Repetition><Interval>PT1M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>
 <Principals><Principal id="Author"><UserId>${xml(sid)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
 <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings>
 <Actions Context="Author"><Exec><Command>${xml(executable)}</Command><Arguments>${xml(args)}</Arguments><WorkingDirectory>${xml(c.baseDir)}</WorkingDirectory></Exec></Actions>
@@ -158,8 +193,33 @@ function powershell(script) {
   ]);
 }
 export function platformAdapter(c) {
-  if (c.platform !== process.platform)
+  if ((c.platform ?? "linux") !== process.platform)
     throw new Error(`Run ${c.platform} service management on that target platform.`);
+  if ((c.platform ?? "linux") === "linux") {
+    const ctl = (...args) => run("systemctl", ["--user", ...args, c.service]);
+    return {
+      info: () => {
+        const text = ctl("show", "--property=ActiveState,MainPID");
+        return {
+          state: text.match(/^ActiveState=(.*)$/m)?.[1] ?? "unknown",
+          pid: text.match(/^MainPID=([1-9][0-9]*)$/m)?.[1] ?? "",
+        };
+      },
+      start: () => ctl("start"),
+      stop: () => ctl("stop"),
+      suspend: () => {},
+      resume: () => {},
+      install: (target) => {
+        ensureSupervisor(c);
+        writeFile(
+          NodePath.join(c.unitDirectory, `${c.service}.d/90-ko-fork.conf`),
+          renderSystemdOverride(c, target),
+        );
+        run("systemctl", ["--user", "daemon-reload"]);
+        ctl("restart");
+      },
+    };
+  }
   if (c.platform === "darwin") {
     const file = NodePath.join(c.unitDirectory, `${c.service}.plist`);
     const domain = `gui/${process.getuid()}`;
@@ -184,15 +244,66 @@ export function platformAdapter(c) {
       } catch {
         /* absent */
       }
-      if (loaded) run("launchctl", ["bootout", name]);
+      if (loaded) stop();
       writeFile(file, value);
-      if (value !== null) run("launchctl", ["bootstrap", domain, file]);
+      if (value !== null) {
+        run("plutil", ["-lint", file]);
+        // bootout returns before launchd has finished unloading the old job.
+        const deadline = Date.now() + 10000;
+        while (true) {
+          try {
+            run("launchctl", ["bootstrap", domain, file]);
+            break;
+          } catch (error) {
+            if (Date.now() >= deadline) throw error;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+          }
+        }
+      }
+    }
+    function stop() {
+      let loaded = false;
+      try {
+        run("launchctl", ["print", name]);
+        loaded = true;
+      } catch {
+        /* unloaded */
+      }
+      if (!loaded) return;
+      const owned = info().pid;
+      run("launchctl", ["bootout", name]);
+      if (!owned) return;
+      const deadline = Date.now() + 10000;
+      while (true) {
+        try {
+          process.kill(Number(owned), 0);
+        } catch (error) {
+          if (error.code === "ESRCH") break;
+          throw error;
+        }
+        if (Date.now() >= deadline) throw Error("launchd wrapper has not finished stopping.");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      }
     }
     return {
       info,
-      stop: () => { if (info().state === 'active') run('launchctl',['bootout',name]); },
+      start: () => {
+        let loaded = false;
+        try {
+          run("launchctl", ["print", name]);
+          loaded = true;
+        } catch {
+          /* unloaded */
+        }
+        if (loaded) run("launchctl", ["kickstart", name]);
+        else run("launchctl", ["bootstrap", domain, file]);
+      },
+      suspend: () => run("launchctl", ["disable", name]),
+      resume: () => run("launchctl", ["enable", name]),
+      stop,
       capture: () => ({ definition: optionalFile(file) }),
       install: (target) => {
+        ensureSupervisor(c);
         const old = optionalFile(file);
         const previous =
           old === null ? {} : JSON.parse(run("plutil", ["-convert", "json", "-o", "-", file]));
@@ -210,7 +321,14 @@ export function platformAdapter(c) {
   const getChild = `$child=$null; if(Test-Path -LiteralPath ${runtime}){ $r=Get-Content -Raw -LiteralPath ${runtime}|ConvertFrom-Json; $candidate=Get-Process -Id $r.pid -ErrorAction SilentlyContinue; if($candidate -and $candidate.Path -eq $r.executable -and $candidate.StartTime.ToUniversalTime().ToString('o') -eq $r.started){$child=$candidate} };`;
   function stop() {
     powershell(
-      `${getTask}${getChild} if($task){ Stop-ScheduledTask -TaskPath '\\' -TaskName ${task} }; if($child -and -not $child.HasExited){ $child.Kill(); $child.WaitForExit(10000)|Out-Null };`,
+      `${getTask}${getChild} if($child){
+        $ownedFile=${psQuote(NodePath.join(c.root, "service-runtime.json"))};
+        if(Test-Path -LiteralPath $ownedFile){$owned=Get-Content -Raw -LiteralPath $ownedFile|ConvertFrom-Json;
+          if($owned.pid -eq $child.Id -and $owned.controlOrigin -match '^http://127\\.0\\.0\\.1:[0-9]+$'){
+            try{Invoke-RestMethod -Method Post -Uri ($owned.controlOrigin+'/stop') -Headers @{Authorization=('Bearer '+$owned.token)} -TimeoutSec 2|Out-Null;$child.WaitForExit(10000)|Out-Null}catch{}
+          }
+        }
+      }; if($child -and -not $child.HasExited){ & taskkill.exe /PID $child.Id /T /F | Out-Null }; if($task){ Stop-ScheduledTask -TaskPath '\\' -TaskName ${task} };`,
     );
   }
   function register(definition) {
@@ -220,6 +338,9 @@ export function platformAdapter(c) {
   }
   return {
     stop,
+    start: () => powershell(`Start-ScheduledTask -TaskPath '\\' -TaskName ${task}`),
+    suspend: () => powershell(`Disable-ScheduledTask -TaskPath '\\' -TaskName ${task}|Out-Null`),
+    resume: () => powershell(`Enable-ScheduledTask -TaskPath '\\' -TaskName ${task}|Out-Null`),
     info: () =>
       JSON.parse(
         powershell(
@@ -234,6 +355,7 @@ export function platformAdapter(c) {
       script: optionalFile(scriptPath),
     }),
     install: (target) => {
+      ensureSupervisor(c);
       const sid = powershell(
         `(New-Object System.Security.Principal.NTAccount(${psQuote(c.userName)})).Translate([System.Security.Principal.SecurityIdentifier]).Value`,
       );

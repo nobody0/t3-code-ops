@@ -22,7 +22,7 @@ GitHub can disable public-repository schedules after 60 days without repository 
 6. Run `node tools/scripts/manage-ko-release.mjs activate CONFIG RELEASE_ID`. The manager verifies the package, isolates a startup check, rechecks idle state, stops the native service, backs up the existing home, rehearses migrations on a copy and then activates. The original home, identities, service names and Tailscale mappings stay intact.
 7. Verify authenticated API and provider readiness, DB integrity and migration report, running commit/receipt, HTTPS descriptor, frontend entry assets and stable process. Test Klarstand first, then Windows, then Caps. Stop the rollout after a failure. Update KO deployment entities with the actual result using `baseRev`; update local observer configurations with the verified commit/release.
 
-The Mac remains pending until it is reachable, awake and Bob is logged in. An agent first verifies architecture, launchd and the old installation. During its initial migration, configure `initialCli` with the verified existing CLI argv, stage the candidate, and keep a copy of its original launchd definition. No startup checker installs software.
+For a first Mac installation, verify architecture, launchd and the existing installation while the device is awake and the operator is logged in. Configure `initialCli` with the verified existing CLI argv and retain its original launchd definition. No startup checker installs software.
 
 ## Recovery
 
@@ -36,8 +36,24 @@ If an activation with a real database fails, the manager attempts to stop the ca
 
 Configure the note as a Firefox home/startup tab without disabling session restore. `templates/install-observer.ps1` installs the hidden Windows login task; the Mac launch-agent equivalent is installed by the agent when that machine returns. The note offers only permanent links and a copyable agent request. KO remains documentation, not a job dispatcher.
 
-For the Mac, run `node templates/install-observer-macos.mjs CONFIG.local.json`, then `node templates/install-startpage-macos.mjs FIREFOX_PROFILE KO_ROOT BUN_PATH`. The second command writes the homepage preference and a login LaunchAgent without opening the browser during setup. It preserves session restore. Keep the KO observer cache machine-local and publish the note through that machine's running KO API.
+For the Mac, first install KO's native service using `node KO_ROOT/tools/install-ko-service.mjs KO_ROOT BUN_PATH`. Then run `node templates/install-observer-macos.mjs CONFIG.local.json` and `node templates/install-startpage-macos.mjs FIREFOX_PROFILE KO_ROOT BUN_PATH`. The reminder only opens Firefox after waiting for KO; it does not launch a backend. It preserves session restore. Keep the KO observer cache machine-local and publish the note through that machine's running KO API.
 
 ## Checks
 
 Run `node --test scripts/*.test.mjs`. For actual native supervision fixtures set `KO_TEST_NATIVE=1` on Windows/macOS or `KO_TEST_SYSTEMD=1` on Linux; these use disposable service names and homes. Never point tests at production data. Review Node, provider CLIs, Tailscale and NixOS upgrades separately.
+
+## Service supervision
+
+Each app has one ownership chain: **native service → app wrapper → app child**. T3 uses `serve-t3.mjs` on Windows, macOS and both Linux roots. KO uses its canonical `server/service.ts` wrapper on Windows and macOS. Native managers recover wrapper exits; wrappers recover child exits and HTTP hangs. There are no separate T3 watchdog jobs. The observer and browser reminder remain read-only clients.
+
+Install T3 supervision with `node scripts/install-t3-supervisor.mjs DEPLOYMENT_ROOT/config.json`. The installer checks idle state and recovery records, retires legacy watchdog tasks/timers, archives their local tooling, and replaces the configured primary service. It preserves the selected release, home, environment identity, credentials and Tailscale routes. The installed tooling receipt is `supervisor-installed.json`.
+
+Control T3 with `node DEPLOYMENT_ROOT/tools/scripts/control-t3-service.mjs status|start|stop DEPLOYMENT_ROOT/config.json`. Intentional stop persists a `service-stopped` marker and disables Windows/macOS startup; Linux's unit condition prevents startup until the marker is cleared. Start resumes the same primary service. Mutating controls use the deployment lock and reject unresolved recovery. Status is read-only. Do not add another direct T3 launcher or an external recovery job.
+
+The primary Windows task is hidden, runs at login and retries once a minute with `IgnoreNew`, so an existing task never overlaps a second instance. macOS uses one `RunAtLoad`/`KeepAlive` LaunchAgent; Linux uses a lingering user service with `Restart=always`. Windows and macOS still require an awake device and logged-in operator. No sleep or wake policy is changed.
+
+The T3 wrapper waits 90 seconds after startup/wake, confirms failed loopback descriptor probes spanning at least 60 seconds, and backs repeated restarts off up to five minutes. It owns only the child it spawned, rejects duplicate wrappers through an exclusive loopback listener, and pauses recovery during deployment locks or unresolved migration records. Provider login, quota and Tailscale failures do not trigger app restarts. Its private `service-runtime.json` contains controller credentials and must never be edited, committed or shared. Supervisor logs rotate near 1 MiB; app output follows the native service's existing log paths.
+
+`scripts/lib/service-monitor.mjs` is the common liveness/backoff implementation. KO vendors the same file under `tools/service-monitor.mjs` so either repository runs independently. Update it here, then run `node scripts/sync-service-monitor.mjs KO_ROOT`; verify parity with `--check` and review both repository changes together.
+
+Run `KO_TEST_SUPERVISOR=1 node --test scripts/service-supervisor*.test.mjs` on each target OS (PowerShell: `$env:KO_TEST_SUPERVISOR='1'`). Fixtures use disposable native services and homes to verify crash/hang recovery, duplicate rejection and clean intentional stop. Validate production local/HTTPS descriptors and native wrapper ownership after installation; do not fault-inject or reboot an active production machine.

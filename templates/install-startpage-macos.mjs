@@ -18,7 +18,7 @@ existing=existing.replace(/\n?\/\/ BEGIN T3 maintenance homepage[\s\S]*?\/\/ END
 fs.writeFileSync(file,existing.trimEnd()+`\n// BEGIN T3 maintenance homepage\nuser_pref("browser.startup.homepage", ${JSON.stringify(pages.join('|'))});\n// END T3 maintenance homepage\n`);
 const launch=path.join(cache,'open-reminder.sh');
 const quote=x=>"'"+x.replaceAll("'","'\\''")+"'";
-fs.writeFileSync(launch,`#!/bin/sh\nif ! /usr/bin/curl -fsS http://localhost:4321/api/health >/dev/null 2>&1; then\n  cd ${quote(koRoot)} || exit 1\n  /usr/bin/nohup ${quote(bun)} dev >>${quote(path.join(cache,'ko-bootstrap.log'))} 2>&1 </dev/null &\n  n=0\n  until /usr/bin/curl -fsS http://localhost:4321/api/health >/dev/null 2>&1; do\n    n=$((n+1)); [ "$n" -ge 15 ] && break; sleep 2\n  done\nfi\n/usr/bin/open -a Firefox ${quote(url)}\n`,{mode:0o700});
+fs.writeFileSync(launch,`#!/bin/sh\n# KO is owned by its native service; this reminder only opens the browser.\nn=0\nuntil /usr/bin/curl -fsS http://localhost:4321/api/health >/dev/null 2>&1; do\n  n=$((n+1)); [ "$n" -ge 15 ] && break; sleep 2\ndone\n/usr/bin/open -a Firefox ${quote(url)}\n`,{mode:0o700});
 const escape=x=>x.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 const label='com.nobody0.t3-maintenance-startpage',domain=`gui/${process.getuid()}`;
 const plist=path.join(os.homedir(),'Library/LaunchAgents',label+'.plist');
