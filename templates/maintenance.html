@@ -5,31 +5,48 @@
 <p id="t3-maintenance-freshness"></p>
 <p><button id="t3-maintenance-copy" type="button">Copy request for an agent</button> <button id="t3-maintenance-dismiss" type="button">Dismiss this candidate reminder</button> <button id="t3-maintenance-refresh" type="button">Refresh observation</button></p>
 <textarea id="t3-maintenance-request" rows="6" readonly aria-label="Request to copy into an agent conversation"></textarea>
-<p>Checks do not install updates. An offline machine stays pending until an agent updates it. Session credentials retain upstream’s 30-day lifetime. A saved connection does not extend credential validity.</p>
-<p>This page reads a local observation, refreshed at login and every five minutes. If KO is unavailable, start its documented <code>bun dev</code> wrapper. Missing or stale observations mean unknown status.</p>
+<h2>Observer log</h2>
+<div id="t3-maintenance-log"></div>
+<p>Checks do not install updates. An offline machine stays pending until an agent updates it. A candidate whose source commit is already verified on a machine only changes operations tooling, which is installed separately, so it is not pending there. Session credentials retain upstream’s 30-day lifetime. A saved connection does not extend credential validity.</p>
+<p>This page reads a local observation, refreshed at login and every five minutes. The observer sends a desktop notification once when something needs attention: a candidate to review, failed or stale preparation, an always-on machine unreachable for an hour, or the observer itself failing. The observer log lists the newest problems it saw, including failed observer runs; a repeated problem is counted on one entry until it clears. If KO is unavailable, start its documented <code>bun dev</code> wrapper. Missing or stale observations mean unknown status.</p>
 <script>
 (() => {
   const get=id=>document.getElementById('t3-maintenance-'+id);
   const key='t3-maintenance:dismissed';
   let candidate=null;
   const age=t=>Date.now()-Date.parse(t);
+  const when=t=>{const d=new Date(t);return Number.isFinite(d.getTime())?d.toLocaleString():'unknown';};
+  function table(titles,rows) {
+    const t=document.createElement('table');
+    const header=t.insertRow();for(const title of titles) {const th=document.createElement('th');th.textContent=title;header.append(th);}
+    for(const values of rows) {const row=t.insertRow();for(const value of values) row.insertCell().textContent=value;}
+    return t;
+  }
+  function renderLog(log) {
+    const entries=Array.isArray(log)?log:[];
+    get('log').replaceChildren(entries.length ? table(['Source','Problem','Since','Last seen','Checks','Cleared'],entries.map(e=>[e.label??e.source,e.message,when(e.firstAt),when(e.lastAt),String(e.count??1),e.resolvedAt?when(e.resolvedAt):'Ongoing'])) : document.createTextNode('No problems recorded.'));
+  }
   async function refresh() {
+    let data;
     try {
-      const data=JSON.parse(await ko.readText('.cache/t3-maintenance/status.json'));
-      if(data.schemaVersion!==1 || !Array.isArray(data.machines)) throw Error('Invalid observation');
-      const p=data.preparation, stale=!Number.isFinite(age(data.checkedAt)) || age(data.checkedAt)>600000;
-      const prepStale=!p || !Number.isFinite(age(p.checkedAt)) || age(p.checkedAt)>28800000;
-      candidate=p?.releaseId ?? null;
-      let dismissed=false;try {dismissed=!!candidate && localStorage.getItem(key)===candidate;}catch{}
-      const pending=data.machines.filter(m=>!candidate || m.verifiedRelease!==candidate);
-      get('status').textContent=stale ? 'Observation is stale. Current fleet status is unknown.' : data.preparationError ? 'Could not refresh preparation status: '+data.preparationError : prepStale ? 'Preparation status is missing or stale.' : p.status==='ready' ? (pending.length ? 'Tested candidate '+candidate+' is ready for agent review.'+(dismissed?' Reminder dismissed for this candidate.':'') : 'All recorded deployments match the tested candidate.') : 'Preparation: '+p.status+(p.error?' — '+p.error:'');
-      const table=document.createElement('table');
-      const header=table.insertRow();for(const title of ['Machine','Observed version','Reachability','Last verified release']) {const th=document.createElement('th');th.textContent=title;header.append(th);}
-      for(const m of data.machines) {const row=table.insertRow();for(const value of [m.label??m.id,m.observedVersion??'Unknown',stale?'Unknown (stale)':m.reachable?'Reachable':'Unreachable / pending',m.verifiedRelease??'Not verified']) row.insertCell().textContent=value;}
-      get('fleet').replaceChildren(table);
-      get('freshness').textContent='Fleet checked: '+data.checkedAt+'. Preparation checked: '+(p?.checkedAt??'unknown')+'. Observed versions do not prove the installed commit.';
-      get('request').value=p?.status==='ready' && !prepStale && !data.preparationError ? 'Review and deploy T3 candidate '+candidate+' (source '+p.sourceCommit+'), following the t3-code-ops runbook and KO fleet documentation. Report: '+p.releaseUrl+'. Verify checksums and migration recovery, defer busy/offline machines, and update Klarstand, Windows, then Caps. Pending recorded machines: '+pending.map(m=>m.label??m.id).join(', ')+'. Include Mac only when reachable. Do not change authentication lifetime.' : 'Review T3 maintenance preparation and pending fleet updates. The KO maintenance note reports missing, stale or failed preparation; diagnose it before proposing or installing a candidate. Mac catch-up remains agent-run.';
-    } catch(e) {get('status').textContent='Maintenance status unknown: '+e.message;get('fleet').replaceChildren();get('request').value='Check the external T3 maintenance observer and preparation report before updating any machine.';}
+      data=JSON.parse(await ko.readText('.cache/t3-maintenance/status.json'));
+      if(data.schemaVersion!==1) throw Error('Invalid observation');
+    } catch(e) {get('status').textContent='Maintenance status unknown: '+e.message;get('fleet').replaceChildren();get('log').replaceChildren();get('request').value='Check the external T3 maintenance observer and preparation report before updating any machine.';return;}
+    renderLog(data.log);
+    const machines=Array.isArray(data.machines)?data.machines:[];
+    const failing=(Array.isArray(data.log)?data.log:[]).find(e=>e.source==='observer' && !e.resolvedAt);
+    const p=data.preparation, stale=!Number.isFinite(age(data.checkedAt)) || age(data.checkedAt)>600000;
+    const prepStale=!p || !Number.isFinite(age(p.checkedAt)) || age(p.checkedAt)>28800000;
+    candidate=p?.releaseId ?? null;
+    let dismissed=false;try {dismissed=!!candidate && localStorage.getItem(key)===candidate;}catch{}
+    // A machine needs the candidate only when its verified source differs; operations-only candidates reuse the deployed source.
+    const current=m=>m.verifiedRelease===candidate || (!!p?.sourceCommit && m.verifiedCommit===p.sourceCommit);
+    const pending=machines.filter(m=>!candidate || !current(m));
+    const opsOnly=!!candidate && !pending.length && machines.some(m=>m.verifiedRelease!==candidate);
+    get('status').textContent=failing ? 'The observer is failing: '+failing.message+'. Current fleet status is unknown.' : stale ? 'Observation is stale. Current fleet status is unknown.' : data.preparationError ? 'Could not refresh preparation status: '+data.preparationError : prepStale ? 'Preparation status is missing or stale.' : p.status==='ready' ? (pending.length ? 'Tested candidate '+candidate+' is ready for agent review.'+(dismissed?' Reminder dismissed for this candidate.':'') : opsOnly ? 'All recorded deployments run the tested source '+p.sourceCommit.slice(0,12)+'. Candidate '+candidate+' only changes operations tooling; no release update is needed.' : 'All recorded deployments match the tested candidate.') : 'Preparation: '+p.status+(p.error?' — '+p.error:'');
+    get('fleet').replaceChildren(table(['Machine','Observed version','Reachability','Last verified release'],machines.map(m=>[m.label??m.id,m.observedVersion??'Unknown',stale?'Unknown (stale)':m.reachable?'Reachable':'Unreachable / pending'+(m.error?' — '+m.error:''),m.verifiedRelease??'Not verified'])));
+    get('freshness').textContent='Fleet checked: '+when(data.checkedAt)+'. Preparation checked: '+(p?when(p.checkedAt):'unknown')+'. Observed versions do not prove the installed commit.';
+    get('request').value=failing ? 'The T3 maintenance observer is failing ('+failing.message+'). Diagnose scripts/observe.mjs and its local configuration in t3-code-ops before reviewing any candidate.' : p?.status==='ready' && !prepStale && !data.preparationError && pending.length ? 'Review and deploy T3 candidate '+candidate+' (source '+p.sourceCommit+'), following the t3-code-ops runbook and KO fleet documentation. Report: '+p.releaseUrl+'. Verify checksums and migration recovery, defer busy/offline machines, and update Klarstand, Windows, then Caps. Pending recorded machines: '+pending.map(m=>m.label??m.id).join(', ')+'. Include Mac only when reachable. Do not change authentication lifetime.' : p?.status==='ready' && !prepStale && !data.preparationError ? 'No T3 release update is pending. Confirm that deployed operations tooling matches t3-code-ops '+(p.opsCommit??'main')+' if it changed.' : 'Review T3 maintenance preparation and pending fleet updates. The KO maintenance note reports missing, stale or failed preparation; diagnose it before proposing or installing a candidate. Mac catch-up remains agent-run.';
   }
   get('copy').onclick=async()=>{try {await navigator.clipboard.writeText(get('request').value);}catch {get('request').focus();get('request').select();}};
   get('dismiss').onclick=()=>{if(candidate){try {localStorage.setItem(key,candidate);}catch{get('status').textContent='Browser storage is unavailable; dismissal could not be saved.';return;}void refresh();}};
