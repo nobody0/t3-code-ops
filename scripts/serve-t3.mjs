@@ -6,6 +6,7 @@ import net from "node:net";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { setTimeout as sleep } from "node:timers/promises";
 import { monitorLiveness, backoffDelay, sleepUnlessAborted } from "./lib/service-monitor.mjs";
 
 const [configPath, target, extra] = process.argv.slice(2);
@@ -21,14 +22,39 @@ let child = null,
   generation = 0,
   phase = "starting",
   lastProbe = null;
-function log(message) {
-  if (fs.existsSync(logFile) && fs.statSync(logFile).size >= 1024 * 1024) {
-    fs.rmSync(logFile + ".1", { force: true });
-    fs.renameSync(logFile, logFile + ".1");
+function rotate(file, limit) {
+  if (fs.existsSync(file) && fs.statSync(file).size >= limit) {
+    fs.rmSync(file + ".1", { force: true });
+    fs.renameSync(file, file + ".1");
   }
+}
+function log(message) {
+  rotate(logFile, 1024 * 1024);
   fs.appendFileSync(logFile, `${new Date().toISOString()} [supervisor] ${message}\n`, {
     mode: 0o600,
   });
+}
+// The native wrapper can vanish while this process runs on. Its broken console
+// pipes must not crash the supervisor, and fatal errors belong in its own log.
+for (const stream of [process.stdout, process.stderr]) stream.on("error", () => {});
+process.on("uncaughtException", (error) => {
+  try {
+    log(`fatal ${error?.stack ?? error}`);
+  } finally {
+    process.exit(1);
+  }
+});
+// Windows wrappers relay console output through pipes that die with them, so the
+// app child writes to its log files directly. Other managers own durable streams.
+const ownLogs = c.platform === "win32";
+function openAppLog(name) {
+  const file = path.join(c.root, name);
+  try {
+    rotate(file, 64 * 1024 * 1024);
+  } catch {
+    /* a lingering reader keeps the file; rotate at the next start */
+  }
+  return fs.openSync(file, "a", 0o600);
 }
 function state() {
   return {
@@ -122,8 +148,56 @@ const server = http.createServer((req, res) => {
 });
 // The control listener is also the ownership lock. The OS releases it on crashes
 // and reboot, and a second wrapper cannot claim it or start a second app child.
-server.listen(c.supervisorPort ?? c.port + 1, "127.0.0.1");
-await once(server, "listening");
+const controlPort = c.supervisorPort ?? c.port + 1;
+async function claim() {
+  try {
+    server.listen(controlPort, "127.0.0.1");
+    await once(server, "listening");
+    return true;
+  } catch (error) {
+    if (error.code !== "EADDRINUSE") throw error;
+    return false;
+  }
+}
+async function currentOwner() {
+  try {
+    const r = JSON.parse(fs.readFileSync(runtime, "utf8"));
+    if (r.controlOrigin !== `http://127.0.0.1:${controlPort}`) return null;
+    const res = await fetch(r.controlOrigin + "/status", {
+      headers: { authorization: `Bearer ${r.token}` },
+      signal: AbortSignal.timeout(3000),
+      redirect: "error",
+    });
+    const s = await res.json();
+    return res.ok && s.service === "t3-supervisor" && s.instanceId === r.instanceId ? s : null;
+  } catch {
+    return null;
+  }
+}
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+// A replacement native wrapper adopts a verified supervisor that outlived its
+// predecessor instead of failing beside it: it keeps the native service occupied
+// while that owner runs, then exits so the service starts a fresh supervisor.
+let waiting = false;
+while (!(await claim())) {
+  const owner = await currentOwner();
+  if (owner) {
+    log(`adopting supervisor pid=${owner.pid} instance=${owner.instanceId}`);
+    while (alive(owner.pid)) await sleep(1000);
+    log(`adopted supervisor pid=${owner.pid} ended; exiting for native restart`);
+    process.exit(1);
+  }
+  if (!waiting) log(`control port ${controlPort} is busy without a verifiable owner; waiting`);
+  waiting = true;
+  await sleep(5000);
+}
 const controlOrigin = `http://127.0.0.1:${server.address().port}`;
 if (fs.existsSync(runtime)) {
   fs.rmSync(runtime + ".previous", { force: true });
@@ -164,27 +238,37 @@ try {
     const env = { ...process.env, T3_KO_MANAGED: "1", T3CODE_HOME: c.baseDir };
     delete env.T3_BOOT_SERVICE_UNIT;
     delete env.T3_SERVICE_LAUNCHER_CONTEXT;
-    child = spawn(
-      c.node,
-      [
-        path.join(target, "node_modules/t3/dist/bin.mjs"),
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(c.port),
-        "--base-dir",
-        c.baseDir,
-      ],
-      { cwd: c.baseDir, env, stdio: "inherit", windowsHide: true },
-    );
-    await once(child, "spawn");
+    const output = ownLogs ? ["service.stdout.log", "service.stderr.log"].map(openAppLog) : null;
+    try {
+      child = spawn(
+        c.node,
+        [
+          path.join(target, "node_modules/t3/dist/bin.mjs"),
+          "serve",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(c.port),
+          "--base-dir",
+          c.baseDir,
+        ],
+        {
+          cwd: c.baseDir,
+          env,
+          stdio: output ? ["ignore", ...output] : "inherit",
+          windowsHide: true,
+        },
+      );
+      await once(child, "spawn");
+    } finally {
+      for (const fd of output ?? []) fs.closeSync(fd);
+    }
     const owned = child,
       started = Date.now();
     save();
     log(`generation=${generation} child=${owned.pid} started`);
     const monitorAbort = new AbortController();
-    const exit = once(owned, "exit").then(([code]) => ({ reason: "exit", code }));
+    const exit = once(owned, "exit").then(([code, signal]) => ({ reason: "exit", code, signal }));
     const stopped = () => monitorAbort.abort();
     stop.signal.addEventListener("abort", stopped, { once: true });
     const policy = {
@@ -225,7 +309,8 @@ try {
     const delay = backoffDelay(failures++, 1000, 300_000);
     phase = "restarting";
     save();
-    log(`generation=${generation} ended reason=${outcome.reason}; retry=${delay}ms`);
+    const ended = outcome.reason === "exit" ? ` code=${outcome.code} signal=${outcome.signal}` : "";
+    log(`generation=${generation} ended reason=${outcome.reason}${ended}; retry=${delay}ms`);
     await sleepUnlessAborted(delay, stop.signal);
   }
 } finally {

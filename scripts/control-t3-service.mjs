@@ -45,8 +45,26 @@ const runtimeFile = path.join(c.root, "service-runtime.json");
 let wrapper = null;
 if (fs.existsSync(runtimeFile)) {
   const r = JSON.parse(fs.readFileSync(runtimeFile, "utf8"));
-  if (String(r.pid) === String(native.pid) && native.state === "active")
+  const running = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  };
+  // A replacement native wrapper adopts a supervisor that outlived its predecessor.
+  const ownership =
+    native.state !== "active"
+      ? null
+      : String(r.pid) === String(native.pid)
+        ? "native"
+        : running(r.pid)
+          ? "adopted"
+          : null;
+  if (ownership)
     wrapper = {
+      ownership,
       pid: r.pid,
       childPid: r.childPid,
       phase: r.phase,

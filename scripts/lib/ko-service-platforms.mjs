@@ -122,19 +122,19 @@ $psi.EnvironmentVariables.Remove('T3_BOOT_SERVICE_UNIT')
 $psi.EnvironmentVariables.Remove('T3_SERVICE_LAUNCHER_CONTEXT')
 $child = New-Object System.Diagnostics.Process
 $child.StartInfo = $psi
-$stdout = [IO.File]::Open(${psQuote(NodePath.join(c.root, "service.stdout.log"))}, 'Append', 'Write', 'ReadWrite')
-$stderr = [IO.File]::Open(${psQuote(NodePath.join(c.root, "service.stderr.log"))}, 'Append', 'Write', 'ReadWrite')
 $started = $false
 try {
   if (-not $child.Start()) { throw 'T3 process did not start.' }
   $started = $true
   @{ pid = $child.Id; started = $child.StartTime.ToUniversalTime().ToString('o'); executable = $nodePath } | ConvertTo-Json -Compress | Set-Content -LiteralPath $runtimePath -Encoding UTF8
-  $outCopy = $child.StandardOutput.BaseStream.CopyToAsync($stdout)
-  $errCopy = $child.StandardError.BaseStream.CopyToAsync($stderr)
+  # The supervisor writes its own and the app's logs, so they survive this wrapper.
+  $outCopy = $child.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
+  $errCopy = $child.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
   $child.WaitForExit()
   $outCopy.GetAwaiter().GetResult()
   $errCopy.GetAwaiter().GetResult()
   $result = $child.ExitCode
+  try { Add-Content -LiteralPath ${psQuote(NodePath.join(c.root, "service-supervisor.log"))} -Value ('{0} [native] supervisor pid={1} exited code={2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ'), $child.Id, $result) } catch {}
 } finally {
   # If the wrapper was killed abruptly, clean only its verified app child tree.
   $ownedRuntime = ${psQuote(NodePath.join(c.root, "service-runtime.json"))}
@@ -320,13 +320,15 @@ export function platformAdapter(c) {
   // Validate both identity and creation time before trusting a reusable process ID.
   const getChild = `$child=$null; if(Test-Path -LiteralPath ${runtime}){ $r=Get-Content -Raw -LiteralPath ${runtime}|ConvertFrom-Json; $candidate=Get-Process -Id $r.pid -ErrorAction SilentlyContinue; if($candidate -and $candidate.Path -eq $r.executable -and $candidate.StartTime.ToUniversalTime().ToString('o') -eq $r.started){$child=$candidate} };`;
   function stop() {
+    // The owner is normally the task's child; after a wrapper replacement it is the
+    // supervisor that child adopted. Its token proves it before the wait.
     powershell(
-      `${getTask}${getChild} if($child){
-        $ownedFile=${psQuote(NodePath.join(c.root, "service-runtime.json"))};
-        if(Test-Path -LiteralPath $ownedFile){$owned=Get-Content -Raw -LiteralPath $ownedFile|ConvertFrom-Json;
-          if($owned.pid -eq $child.Id -and $owned.controlOrigin -match '^http://127\\.0\\.0\\.1:[0-9]+$'){
-            try{Invoke-RestMethod -Method Post -Uri ($owned.controlOrigin+'/stop') -Headers @{Authorization=('Bearer '+$owned.token)} -TimeoutSec 2|Out-Null;$child.WaitForExit(10000)|Out-Null}catch{}
-          }
+      `${getTask}${getChild}
+      $ownedFile=${psQuote(NodePath.join(c.root, "service-runtime.json"))};
+      if(Test-Path -LiteralPath $ownedFile){$owned=Get-Content -Raw -LiteralPath $ownedFile|ConvertFrom-Json;
+        if($owned.controlOrigin -match '^http://127\\.0\\.0\\.1:[0-9]+$'){
+          $supervisor=Get-Process -Id $owned.pid -ErrorAction SilentlyContinue;
+          try{Invoke-RestMethod -Method Post -Uri ($owned.controlOrigin+'/stop') -Headers @{Authorization=('Bearer '+$owned.token)} -TimeoutSec 2|Out-Null;if($supervisor){$supervisor.WaitForExit(10000)|Out-Null}}catch{}
         }
       }; if($child -and -not $child.HasExited){ & taskkill.exe /PID $child.Id /T /F | Out-Null }; if($task){ Stop-ScheduledTask -TaskPath '\\' -TaskName ${task} };`,
     );
