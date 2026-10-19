@@ -4,20 +4,26 @@ import {DatabaseSync} from 'node:sqlite';
 import net from 'node:net';
 import {run,atomicJson} from './ko-release.mjs';
 
+// T3 0.1.0 seeds userdata/statev2.sqlite once from the V1 state.sqlite and then serves only V2.
+// Both stay on disk; the V2 file is live once it exists.
+export const DATABASES=['statev2.sqlite','state.sqlite'];
+export function liveDatabase(baseDir) {
+  return DATABASES.map(name=>path.join(baseDir,'userdata',name)).find(file=>fs.existsSync(file)) ?? null;
+}
 export function databaseState(baseDir) {
-  const file=path.join(baseDir,'userdata/state.sqlite');
-  if (!fs.existsSync(file)) return null;
+  const file=liveDatabase(baseDir);
+  if (!file) return null;
   const db=new DatabaseSync(file,{readOnly:true});
   try {
     const integrity=db.prepare('PRAGMA integrity_check').all();
     if (integrity.length!==1 || Object.values(integrity[0])[0]!=='ok') throw Error('Database integrity check failed');
     const migrations=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%migration%' ORDER BY name").all()
       .map(({name})=>({name,rows:db.prepare(`SELECT * FROM "${name.replaceAll('"','""')}" ORDER BY 1`).all()}));
-    return {migrations,integrity:'ok'};
+    return {database:path.basename(file),migrations,integrity:'ok'};
   } finally {db.close();}
 }
 export async function assertIdle(c) {
-  if (!fs.existsSync(path.join(c.baseDir,'userdata/state.sqlite'))) return;
+  if (!liveDatabase(c.baseDir)) return;
   const environmentId=fs.readFileSync(path.join(c.baseDir,'userdata/environment-id'),'utf8').trim();
   const argv=installedCli(c);
   const helper=path.resolve(import.meta.dirname,'../ko-session.mjs');
@@ -37,7 +43,7 @@ export function snapshotStoppedHome(c, previous) {
   const state=databaseState(c.baseDir);
   const backup=path.join(c.root,'backups',new Date().toISOString().replaceAll(':','-'));
   fs.mkdirSync(backup,{recursive:true,mode:0o700});
-  for (const name of ['state.sqlite','state.sqlite-wal','state.sqlite-shm','settings.json','keybindings.json','environment-id','secrets']) {
+  for (const name of [...DATABASES.flatMap(db=>[db,db+'-wal',db+'-shm']),'settings.json','keybindings.json','environment-id','secrets','themes']) {
     const source=path.join(c.baseDir,'userdata',name);
     if(fs.existsSync(source)) fs.cpSync(source,path.join(backup,name),{recursive:true,dereference:false});
   }
@@ -54,11 +60,11 @@ export async function assertStopped(c) {
   });
 }
 export function requireSafeBinaryRollback(c,journal) {
-  if (fs.existsSync(path.join(c.baseDir,'userdata/state.sqlite')))
+  if (liveDatabase(c.baseDir))
     throw Error('Live database exists: binary-only rollback is disabled. An agent must review the recorded backup and migrations; never overwrite newer work automatically.');
 }
 export function verifyMigrationSource(c,target) {
-  if(!fs.existsSync(path.join(c.baseDir,'userdata/state.sqlite'))) return;
+  if(!liveDatabase(c.baseDir)) return;
   if(!c.migrationSource) throw Error('Configure migrationSource to the verified candidate checkout before upgrading a database.');
   const manifest=JSON.parse(fs.readFileSync(path.join(target,'release.json'),'utf8'));
   const commit=run('git',['rev-parse','HEAD'],{cwd:c.migrationSource});

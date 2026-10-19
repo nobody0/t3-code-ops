@@ -8,7 +8,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, run, verifyInstalled } from "./ko-release.mjs";
 import { nativeManage, nativeStatus, nativeRecovery } from "./ko-deployment-native.mjs";
 import {ensureSupervisor,renderSystemdOverride} from './ko-service-platforms.mjs';
-import {assertIdle,snapshotStoppedHome,databaseState,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
+import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
 
 export function loadConfig(path) {
   const config = readJson(path);
@@ -302,7 +302,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       await healthy(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")));
       atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
     } catch (error) {
-      if (NodeFS.existsSync(NodePath.join(c.baseDir,'userdata/state.sqlite'))) {
+      if (liveDatabase(c.baseDir)) {
         let stopFailure;
         try {control(c,'stop');} catch(e) {stopFailure=e.message;}
         atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});

@@ -46,7 +46,9 @@ fails before dispatch and lists available providers/models. Optional workspace i
 "worktree" (default) or "local". Worktrees start from the verified ref's current
 local commit, without pulling. Dirty changes are not copied into isolated worktrees.
 runtimeMode defaults to "approval-required"; interactionMode defaults to "default".
-Optional projectTitle names a newly registered project. Setup scripts do not run.
+Optional projectTitle names a newly registered project. On T3 0.1.0+ (orchestration
+protocol 2) the server launches the thread and runs an existing project's setup
+script; earlier servers skip setup scripts. Projects registered here have none.
 
 Reuse the SAME requestId and unchanged request after timeout or uncertain results.
 Receipts in <home>/ko-launches preserve exact command IDs/payloads; do not delete
@@ -115,13 +117,21 @@ export async function callRpc(
   base,
   tag,
   payload,
-  { WebSocketClass = globalThis.WebSocket, timeoutMs = 10000, firstChunk = false } = {},
+  {
+    WebSocketClass = globalThis.WebSocket,
+    timeoutMs = 10000,
+    firstChunk = false,
+    orchestrationProtocol,
+  } = {},
 ) {
   if (!WebSocketClass) throw new Error("Native WebSocket is required; use Node >=22 or Bun.");
   const { ticket } = await http("/api/auth/websocket-ticket", { method: "POST" });
   const url = new URL("/ws", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("wsTicket", ticket);
+  // Protocol 2 servers refuse WebSockets that do not negotiate it (HTTP 426).
+  if (orchestrationProtocol)
+    url.searchParams.set("orchestrationProtocol", String(orchestrationProtocol));
   return new Promise((resolveConfig, reject) => {
     let socket;
     let settled = false;
@@ -171,8 +181,13 @@ export async function callRpc(
   });
 }
 
-export function readServerConfig(http, base, WebSocketClass = globalThis.WebSocket) {
-  return callRpc(http, base, "server.getConfig", {}, { WebSocketClass });
+export function readServerConfig(
+  http,
+  base,
+  WebSocketClass = globalThis.WebSocket,
+  orchestrationProtocol,
+) {
+  return callRpc(http, base, "server.getConfig", {}, { WebSocketClass, orchestrationProtocol });
 }
 
 export function providerSummary(config) {
@@ -227,8 +242,49 @@ function normalizeRequest(input) {
   };
 }
 
+// V1 thread details are {thread}; V2 are {projection:{thread, runs, messages, providerSessions}}.
+export function readThreadDetail(detail) {
+  if (!detail) return null;
+  if (!detail.projection) return detail.thread ?? null;
+  const { thread, runs = [], messages = [], providerSessions = [] } = detail.projection;
+  return {
+    ...thread,
+    messages,
+    latestRun: [...runs].sort((a, b) => b.ordinal - a.ordinal)[0] ?? null,
+    lastError: providerSessions.find((s) => s.lastError)?.lastError ?? null,
+  };
+}
+
+const V2_BUSY = ["preparing", "queued", "starting", "running", "waiting"];
+export function busyThreads(shell, protocol) {
+  if (protocol < 2)
+    return shell.threads.filter(
+      (t) => t.session?.activeTurnId || ["starting", "running"].includes(t.session?.status),
+    );
+  const threads = [...shell.threads, ...(shell.archivedThreads ?? [])];
+  if (threads.some((t) => typeof t.status !== "string"))
+    throw new Error("Unsupported idle snapshot; activation is blocked.");
+  // The server reports queues held for the user after a restart as idle; they never start alone.
+  return threads.filter(
+    (t) =>
+      t.activeRunId ||
+      t.activityRunStatus ||
+      V2_BUSY.includes(t.status) ||
+      t.pendingRuntimeRequest ||
+      t.pendingBackgroundTasks?.length,
+  );
+}
+
 export function executionStatus(thread) {
   if (!thread) return "accepted";
+  if (thread.latestRun !== undefined) {
+    const status = thread.latestRun?.status;
+    if (status === "failed") return "failed";
+    if (status === "completed") return "completed";
+    if (["interrupted", "cancelled", "rolled_back"].includes(status)) return "interrupted";
+    if (["preparing", "starting", "running", "waiting"].includes(status)) return "started";
+    return "accepted";
+  }
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "failed";
   if (thread.latestTurn?.state === "completed") return "completed";
   if (thread.latestTurn?.state === "interrupted") return "interrupted";
@@ -259,6 +315,7 @@ export async function run(options, input, dependencies = {}) {
   let output;
   let receipt;
   let cleanupWarning;
+  let protocol = 1;
   const http = async (path, init = {}, allowMissing = false) => {
     let response;
     try {
@@ -269,6 +326,7 @@ export async function run(options, input, dependencies = {}) {
         headers: {
           "Content-Type": "application/json",
           ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+        ...(protocol >= 2 ? { "x-t3-orchestration-protocol": String(protocol) } : {}),
           ...init.headers,
         },
       });
@@ -314,6 +372,15 @@ export async function run(options, input, dependencies = {}) {
     const descriptor = await http("/.well-known/t3/environment");
     if (descriptor.environmentId !== options.environmentId)
       throw new Error("T3 environment identity mismatch; check the target device and deployment.");
+    // Servers before 0.1.0 do not advertise an orchestration protocol.
+    protocol = descriptor.orchestrationProtocolVersion ?? 1;
+    if (![1, 2].includes(protocol))
+      throw new Error(`Unsupported T3 orchestration protocol ${protocol}; update ko-session.mjs.`);
+    const rpc = (tag, payload, rpcOptions = {}) =>
+      callRpc(http, base, tag, payload, { ...rpcOptions, orchestrationProtocol: protocol });
+    const readConfig = () => getConfig(http, base, undefined, protocol);
+    const readThread = async (threadId) =>
+      readThreadDetail(await http(`/api/orchestration/threads/${threadId}`, {}, true));
     let issued;
     try {
       issued = JSON.parse(
@@ -329,15 +396,15 @@ export async function run(options, input, dependencies = {}) {
     const shell = await http("/api/orchestration/shell");
     if (!Array.isArray(shell.projects)) throw new Error("Unsupported T3 shell response.");
     if (options.action === 'idle') {
-      const metadata = await callRpc(http,base,'subscribeTerminalMetadata',{}, {firstChunk:true});
+      const metadata = await rpc('subscribeTerminalMetadata',{}, {firstChunk:true});
       if (metadata?.type !== 'snapshot' || !Array.isArray(metadata.terminals) || !Array.isArray(shell.threads))
         throw new Error('Unsupported idle snapshot; activation is blocked.');
-      const busyThreads = shell.threads.filter(t => t.session?.activeTurnId || ['starting','running'].includes(t.session?.status));
+      const threads = busyThreads(shell, protocol);
       const busyTerminals = metadata.terminals.filter(t => t.hasRunningSubprocess || t.status === 'starting');
-      output = {status:busyThreads.length || busyTerminals.length ? 'busy' : 'idle', environmentId:descriptor.environmentId,
-        busyThreads:busyThreads.map(t=>t.id), busyTerminals:busyTerminals.map(t=>t.terminalId)};
+      output = {status:threads.length || busyTerminals.length ? 'busy' : 'idle', environmentId:descriptor.environmentId,
+        busyThreads:threads.map(t=>t.id), busyTerminals:busyTerminals.map(t=>t.terminalId)};
     } else if (options.action === "check") {
-      const providers = providerSummary(await getConfig(http, base));
+      const providers = providerSummary(await readConfig());
       output = {
         status: "healthy",
         environmentId: descriptor.environmentId,
@@ -371,17 +438,22 @@ export async function run(options, input, dependencies = {}) {
         cwd: thread?.worktreePath ?? receipt.cwd,
         ref: thread?.branch ?? receipt.ref,
         url: `${watch}/${encodeURIComponent(options.environmentId)}/${encodeURIComponent(receipt.command.threadId)}`,
-        ...(thread?.session?.lastError ? { error: thread.session.lastError } : {}),
+        ...((thread?.session?.lastError ?? thread?.lastError)
+          ? { error: thread.session?.lastError ?? thread.lastError }
+          : {}),
       });
-      let thread = receipt
-        ? (await http(`/api/orchestration/threads/${receipt.command.threadId}`, {}, true))?.thread
-        : null;
-      const messageAlreadyStored = thread?.messages?.some(
-        (m) => m.id === receipt.command.message.messageId,
-      );
+      let thread = receipt ? await readThread(receipt.command.threadId) : null;
+      const messageId =
+        receipt?.command.message?.messageId ?? receipt?.command.initialMessage?.messageId;
+      const messageAlreadyStored = thread?.messages?.some((m) => m.id === messageId);
       if (messageAlreadyStored) {
         output = await report(thread);
       } else {
+        // A receipt replays its exact command, which only its own protocol accepts.
+        if (receipt && (receipt.version === 2) !== (protocol >= 2))
+          throw new Error(
+            "This requestId was prepared for another T3 orchestration protocol and has not started; intentionally choose a new requestId.",
+          );
         if (!receipt) {
           const cwd = await realpath(request.cwd);
           const git = async (...args) =>
@@ -407,7 +479,7 @@ export async function run(options, input, dependencies = {}) {
               "Multiple T3 projects use this checkout; resolve the duplicate project records before launch.",
             );
           const project = matches[0];
-          const config = await getConfig(http, base);
+          const config = await readConfig();
           const modelSelection = request.modelSelection ?? savedProjectModel(config, project);
           const providers = providerSummary(config);
           if (!modelSelection)
@@ -437,8 +509,7 @@ export async function run(options, input, dependencies = {}) {
             instanceId: modelSelection.instanceId ?? modelSelection.provider,
           };
           delete selection.provider;
-          receipt = {
-            version: 1,
+          const prepared = {
             requestHash,
             cwd,
             ref: request.ref,
@@ -453,8 +524,29 @@ export async function run(options, input, dependencies = {}) {
                   projectId,
                   title: request.projectTitle ?? request.title,
                   workspaceRoot: cwd,
-                  createdAt,
+                  ...(protocol >= 2 ? {} : { createdAt }),
                 },
+          };
+          receipt = protocol >= 2 ? {
+            version: 2,
+            ...prepared,
+            command: {
+              commandId: id("turn-command", key),
+              threadId,
+              projectId,
+              title: request.title,
+              modelSelection: selection,
+              runtimeMode: request.runtimeMode,
+              interactionMode: request.interactionMode,
+              workspaceStrategy:
+                request.workspace === "worktree"
+                  ? { type: "worktree", baseRef: currentCommit, branch, startFromOrigin: false }
+                  : { type: "root", branch: request.ref },
+              initialMessage: { messageId: id("message", key), text: request.prompt, attachments: [] },
+            },
+          } : {
+            version: 1,
+            ...prepared,
             command: {
               type: "thread.turn.start",
               commandId: id("turn-command", key),
@@ -519,22 +611,30 @@ export async function run(options, input, dependencies = {}) {
               "Local checkout moved since this request was prepared; inspect it before intentionally creating another request.",
             );
         }
-        if (receipt.projectCommand)
-          await http("/api/orchestration/dispatch", {
+        // Protocol 2 project creation is not idempotent; a retry finds the project in the shell.
+        if (
+          receipt.projectCommand &&
+          !(protocol >= 2 && shell.projects.some((p) => p.id === receipt.projectId))
+        )
+          await http(protocol >= 2 ? "/api/projects/mutate" : "/api/orchestration/dispatch", {
             method: "POST",
             body: JSON.stringify(receipt.projectCommand),
           });
         // HTTP dispatch bypasses the UI's bootstrap handler. Thread/worktree bootstrap
-        // must use this normal WebSocket RPC, the same path as the T3 composer.
+        // must use this normal WebSocket RPC, the same path as the T3 composer. Protocol 2
+        // launches through the server, which deduplicates retries by commandId.
         const dispatchTurn =
           dependencies.dispatchTurn ??
           ((command) =>
-            callRpc(http, base, "orchestration.dispatchCommand", command, { timeoutMs: 55000 }));
+            rpc(
+              protocol >= 2 ? "orchestration.launchThread" : "orchestration.dispatchCommand",
+              command,
+              { timeoutMs: 55000 },
+            ));
         const { sequence } = await dispatchTurn(receipt.command);
         const deadline = Date.now() + (options.waitMs ?? 15000);
         do {
-          thread = (await http(`/api/orchestration/threads/${receipt.command.threadId}`, {}, true))
-            ?.thread;
+          thread = await readThread(receipt.command.threadId);
           if (executionStatus(thread) !== "accepted" || Date.now() >= deadline) break;
           await pause(500);
         } while (true);

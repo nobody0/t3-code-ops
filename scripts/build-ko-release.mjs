@@ -117,6 +117,12 @@ runtimePackage.overrides = resolveCatalogDependencies(
   workspace.catalog ?? {},
   "apps/server",
 );
+// Since 0.1.0 workspace packages are runtime dependencies that the CLI bundle inlines;
+// npm cannot install `workspace:` specs, so they must stay out of the staged manifest.
+const workspaceDependencies = Object.keys(runtimePackage.dependencies).filter((name) =>
+  runtimePackage.dependencies[name].startsWith("workspace:"),
+);
+for (const name of workspaceDependencies) delete runtimePackage.dependencies[name];
 runtimePackage.repository = {
   ...serverPackage.repository,
   url: "https://github.com/nobody0/t3code",
@@ -126,6 +132,14 @@ NodeFS.mkdirSync(staging);
 NodeFS.cpSync(NodePath.join(root, "apps/server/dist"), NodePath.join(staging, "dist"), {
   recursive: true,
 });
+for (const file of NodeFS.readdirSync(NodePath.join(staging, "dist"), { recursive: true })) {
+  if (!/\.(mjs|cjs|js)$/.test(file) || file.split(/[\\/]/)[0] === "client") continue;
+  const text = NodeFS.readFileSync(NodePath.join(staging, "dist", file), "utf8");
+  const imported = workspaceDependencies.find((name) =>
+    new RegExp(`(from ?|import\\(|require\\()["']${name.replace(/[/.]/g, "\\$&")}["'/]`).test(text),
+  );
+  if (imported) throw new Error(`The CLI bundle imports workspace package ${imported} at runtime.`);
+}
 // The launch helper is dependency-free and travels with the verified runtime.
 NodeFS.copyFileSync(
   NodePath.join(opsRoot, "scripts/ko-session.mjs"),

@@ -390,3 +390,192 @@ test("launch bootstrap uses the normal WebSocket orchestration RPC", async () =>
     { sequence: 17 },
   );
 });
+
+// Orchestration protocol 2 (T3 0.1.0+): shell/thread reads need the protocol header,
+// launches go through orchestration.launchThread and project creation through /api/projects/mutate.
+async function fixtureV2(t) {
+  const f = await fixture(t);
+  Object.assign(f.state, { shellThreads: [], runStatus: "running" });
+  const v1Fetch = f.deps.fetch;
+  f.deps.fetch = async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path === "/.well-known/t3/environment")
+      return json({
+        environmentId: "test-env",
+        label: "Test device",
+        serverVersion: "0.1.0",
+        orchestrationProtocolVersion: 2,
+      });
+    if (path === "/api/orchestration/dispatch") throw new Error("Removed in protocol 2");
+    if (path.startsWith("/api/orchestration/"))
+      assert.equal(init.headers["x-t3-orchestration-protocol"], "2");
+    if (path === "/api/orchestration/shell")
+      return json({
+        schemaVersion: 1,
+        snapshotSequence: 1,
+        threads: f.state.shellThreads,
+        archivedThreads: [],
+        projects: f.state.project
+          ? [
+              {
+                id: f.state.createdProject ?? "saved-project",
+                workspaceRoot: f.request.cwd,
+                defaultModelSelection: selected,
+              },
+            ]
+          : [],
+      });
+    if (path === "/api/projects/mutate") {
+      const command = JSON.parse(init.body);
+      assert.equal(command.createdAt, undefined);
+      f.state.calls.push(command);
+      f.state.project = true;
+      f.state.createdProject = command.projectId;
+      return json({ id: command.projectId });
+    }
+    if (path.startsWith("/api/orchestration/threads/")) {
+      const thread = f.state.threads.get(path.split("/").at(-1));
+      return thread ? json({ snapshotSequence: 2, projection: thread }) : json({}, 404);
+    }
+    return v1Fetch(url, init);
+  };
+  f.deps.dispatchTurn = async (input) => {
+    assert.equal(input.type, undefined);
+    f.state.calls.push(input);
+    f.state.threads.set(input.threadId, {
+      thread: { id: input.threadId, worktreePath: join(f.home, "isolated"), branch: "ko/test-branch" },
+      runs: [
+        { ordinal: 1, status: "completed" },
+        { ordinal: 2, status: f.state.runStatus },
+      ],
+      messages: [{ id: input.initialMessage.messageId }],
+      providerSessions: [{ lastError: f.state.runStatus === "failed" ? "Provider failed" : null }],
+    });
+    if (f.state.timeout) throw new Error("Request timed out with secret-token");
+    return { threadId: input.threadId, resumed: false };
+  };
+  return f;
+}
+
+test("protocol 2 launch pins the worktree strategy and reports the latest run", async (t) => {
+  const f = await fixtureV2(t);
+  const result = await run(f.options, f.request, f.deps);
+  assert.equal(result.status, "started");
+  assert.equal(result.cwd, join(f.home, "isolated"));
+  const [launch] = f.state.calls;
+  assert.deepEqual(launch.workspaceStrategy, {
+    type: "worktree",
+    baseRef: "0123456789",
+    branch: launch.workspaceStrategy.branch,
+    startFromOrigin: false,
+  });
+  assert.match(launch.workspaceStrategy.branch, /^ko\//);
+  assert.equal(launch.projectId, "saved-project");
+  assert.deepEqual(launch.modelSelection, selected);
+  assert.equal(launch.initialMessage.text, f.request.prompt);
+  assert.ok(f.state.auth.at(-1).includes("revoke"));
+});
+
+test("protocol 2 retry after a timeout reports the stored launch without relaunching", async (t) => {
+  const f = await fixtureV2(t);
+  f.state.timeout = true;
+  const first = await run(f.options, f.request, f.deps);
+  assert.equal(first.status, "error");
+  assert.ok(!JSON.stringify(first).includes("secret-token"));
+  f.state.timeout = false;
+  const retry = await run(f.options, f.request, f.deps);
+  assert.equal(retry.status, "started");
+  assert.equal(retry.threadId, first.threadId);
+  assert.equal(f.state.calls.length, 1);
+});
+
+test("protocol 2 registers a missing project once and keeps a local checkout in place", async (t) => {
+  const f = await fixtureV2(t);
+  f.state.project = false;
+  f.state.timeout = true;
+  const request = { ...f.request, workspace: "local", modelSelection: selected };
+  await run(f.options, request, f.deps);
+  f.state.threads.clear();
+  f.state.timeout = false;
+  assert.equal((await run(f.options, request, f.deps)).status, "started");
+  assert.deepEqual(
+    f.state.calls.map((c) => c.type ?? "launch"),
+    ["project.create", "launch", "launch"],
+  );
+  assert.deepEqual(f.state.calls[1].workspaceStrategy, { type: "root", branch: "main" });
+  assert.deepEqual(f.state.calls[2], f.state.calls[1]);
+});
+
+test("protocol 2 failed runs return the provider error", async (t) => {
+  const f = await fixtureV2(t);
+  f.state.runStatus = "failed";
+  const result = await run(f.options, f.request, f.deps);
+  assert.equal(result.status, "failed");
+  assert.equal(result.error, "Provider failed");
+});
+
+test("a protocol 1 receipt is not replayed against a protocol 2 server", async (t) => {
+  const f = await fixture(t);
+  f.state.timeout = true;
+  await run(f.options, f.request, f.deps);
+  const v2 = await fixtureV2(t);
+  v2.options.homeDir = f.home;
+  v2.request.cwd = f.request.cwd;
+  const result = await run(v2.options, v2.request, v2.deps);
+  assert.match(result.error, /another T3 orchestration protocol/);
+  assert.equal(v2.state.calls.length, 0);
+});
+
+test("protocol 2 idle refuses running, queued, waiting and background work but not held queues", async (t) => {
+  const f = await fixtureV2(t);
+  const idle = { status: "idle", activeRunId: null, pendingRuntimeRequest: null };
+  f.deps.dispatchTurn = undefined;
+  const terminals = { type: "snapshot", terminals: [] };
+  const rpcFetch = f.deps.fetch;
+  f.deps.fetch = async (url, init) =>
+    new URL(url).pathname === "/api/auth/websocket-ticket"
+      ? json({ ticket: "ticket" })
+      : rpcFetch(url, init);
+  class FakeSocket extends EventTarget {
+    constructor(url) {
+      super();
+      assert.equal(new URL(url).searchParams.get("orchestrationProtocol"), "2");
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send(text) {
+      const request = JSON.parse(text);
+      assert.equal(request.tag, "subscribeTerminalMetadata");
+      queueMicrotask(() =>
+        this.dispatchEvent(
+          new MessageEvent("message", {
+            data: JSON.stringify({ _tag: "Chunk", requestId: request.id, values: [terminals] }),
+          }),
+        ),
+      );
+    }
+    close() {}
+  }
+  const previous = globalThis.WebSocket;
+  globalThis.WebSocket = FakeSocket;
+  t.after(() => {
+    globalThis.WebSocket = previous;
+  });
+  const idleCheck = () => run({ ...f.options, action: "idle" }, undefined, f.deps);
+  f.state.shellThreads = [{ ...idle, id: "held" }];
+  assert.equal((await idleCheck()).status, "idle");
+  for (const busy of [
+    { status: "running", activeRunId: "run" },
+    { status: "queued" },
+    { status: "waiting" },
+    { activityRunStatus: "waiting" },
+    { pendingRuntimeRequest: { id: "approval" } },
+    { pendingBackgroundTasks: [{ id: "subagent" }] },
+  ]) {
+    f.state.shellThreads = [{ ...idle, id: "held" }, { ...idle, ...busy, id: "busy" }];
+    const result = await idleCheck();
+    assert.equal(result.status, "busy", JSON.stringify(busy));
+    assert.deepEqual(result.busyThreads, ["busy"]);
+  }
+  f.state.shellThreads = [{ id: "unknown-shape", session: { status: "running" } }];
+  assert.match((await idleCheck()).error, /Unsupported idle snapshot/);
+});

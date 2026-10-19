@@ -22,6 +22,22 @@ test('rollback cannot replace binaries against a migrated live database',async t
   await assert.rejects(nativeManage(c,'rollback',undefined,{adapter:{restore:()=>{restored=true;}}}),/binary-only rollback is disabled/);
   assert.equal(restored,false);
 });
+test('a V2 home backs up both databases and treats statev2 as the live one',t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-safety-v2-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const c={root,baseDir:path.join(root,'home')};
+  fs.mkdirSync(path.join(c.baseDir,'userdata'),{recursive:true});
+  for (const [name,id] of [['state.sqlite',54],['statev2.sqlite',62]]) {
+    const db=new DatabaseSync(path.join(c.baseDir,'userdata',name));
+    db.exec(`CREATE TABLE effect_sql_migrations (id INTEGER); INSERT INTO effect_sql_migrations VALUES (${id});`);db.close();
+  }
+  const backup=snapshotStoppedHome(c,{});
+  assert.equal(backup.before.database,'statev2.sqlite');assert.equal(backup.before.migrations[0].rows[0].id,62);
+  for (const name of ['state.sqlite','statev2.sqlite']) assert.ok(fs.existsSync(path.join(backup.backup,name)));
+  fs.rmSync(path.join(c.baseDir,'userdata/state.sqlite'));
+  assert.equal(databaseState(c.baseDir).database,'statev2.sqlite');
+  assert.throws(()=>requireSafeBinaryRollback(c,{}),/binary-only rollback is disabled/);
+});
 test('after initial Mac migration, idle checks use the selected CLI instead of the old fallback',t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-cli-selection-'));
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
