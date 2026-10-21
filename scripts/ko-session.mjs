@@ -1,77 +1,43 @@
 #!/usr/bin/env node
 // Standalone operational client; intentionally has no workspace dependencies.
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
-const hash = (value) => createHash("sha256").update(value).digest("hex");
-const canonical = (value) =>
-  JSON.stringify(value, (_, v) =>
-    v && typeof v === "object" && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
-      : v,
-  );
-const id = (kind, key) => `ko-${kind}-${hash(key).slice(0, 32)}`;
 const required = (value, name) => {
   if (typeof value !== "string" || !value.trim())
     throw new Error(`${name} must be a nonempty string.`);
   return value;
 };
 
-export const help = `KO task launcher for an installed T3 server (Node >=22 or Bun).
+export const help = `KO release health checks for an installed T3 server (Node >=22 or Bun).
 
-  node ko-session.mjs check|idle|start --home-dir PATH --origin URL
-    --environment-id ID --t3-command '["/path/to/t3"]' [--request FILE|-]
-    [--watch-origin URL] [--wait-ms 15000]
+  node ko-session.mjs check|idle --home-dir PATH --origin URL
+    --environment-id ID --t3-command '["/path/to/t3"]'
 
 Run on the target device, locally or over SSH. --home-dir is the existing T3
 base directory, not userdata. --t3-command is a JSON argv array, e.g.
-["node","/opt/t3/dist/index.mjs"]. It must be the installed release's CLI.
+["node","/opt/t3/dist/bin.mjs"]. It must be the installed release's CLI.
 The helper calls its auth CLI with --base-dir; no shell command is evaluated.
 check probes the runtime, descriptor, authenticated API and provider configuration.
 idle refuses active turns, starting sessions and terminal subprocesses using the existing APIs.
 It creates a short-lived session and revokes it; it never starts an agent.
-
-start requires JSON from --request (use '-' for stdin):
-{"requestId":"unique-attempt-id","cwd":"/verified/checkout","ref":"main",
- "title":"KO task title","prompt":"Self-contained task and related context",
- "modelSelection":{"instanceId":"codex","model":"chosen-model"}}
-
-modelSelection defaults to the existing project's saved model; missing selection
-fails before dispatch and lists available providers/models. Optional workspace is
-"worktree" (default) or "local". Worktrees start from the verified ref's current
-local commit, without pulling. Dirty changes are not copied into isolated worktrees.
-runtimeMode defaults to "approval-required"; interactionMode defaults to "default".
-Optional projectTitle names a newly registered project. On T3 0.1.0+ (orchestration
-protocol 2) the server launches the thread and runs an existing project's setup
-script; earlier servers skip setup scripts. Projects registered here have none.
-
-Reuse the SAME requestId and unchanged request after timeout or uncertain results.
-Receipts in <home>/ko-launches preserve exact command IDs/payloads; do not delete
-them during retries. A new ID intentionally starts new work. Output is safe JSON:
-started, completed, interrupted, failed, or accepted (not yet confirmed running).
-Errors after possible dispatch include the request/thread IDs for recovery.
---watch-origin may point to the shared Caps UI; it must already know this environment.
-Neither a healthy descriptor nor accepted dispatch alone proves an agent is running.
+Agent launches and delegation use T3 Code's native MCP tools.
 `;
 
 export function parseArgs(argv) {
   if (argv.includes("--help") || argv.includes("-h")) return { help: true };
   const [action, ...rest] = argv;
-  if (!["check", "idle", "start"].includes(action)) throw new Error("Choose check, idle or start; see --help.");
-  const options = { action, waitMs: 15000 };
+  if (!["check", "idle"].includes(action)) throw new Error("Choose check or idle; agent launches use T3 Code MCP tools.");
+  const options = { action };
   const names = {
     "--home-dir": "homeDir",
     "--origin": "origin",
     "--environment-id": "environmentId",
     "--t3-command": "t3Command",
-    "--request": "request",
-    "--watch-origin": "watchOrigin",
-    "--wait-ms": "waitMs",
   };
   for (let i = 0; i < rest.length; i += 2) {
     const key = names[rest[i]];
@@ -89,10 +55,6 @@ export function parseArgs(argv) {
   ) {
     throw new Error("--t3-command must be a nonempty JSON argv array.");
   }
-  options.waitMs = Number(options.waitMs);
-  if (!Number.isFinite(options.waitMs) || options.waitMs < 0 || options.waitMs > 60000)
-    throw new Error("--wait-ms must be 0..60000.");
-  if (action === "start") required(options.request, "--request");
   return options;
 }
 
@@ -144,7 +106,7 @@ export async function callRpc(
       else resolveConfig(config);
     };
     const timer = setTimeout(
-      () => finish(new Error(`T3 ${tag} timed out; preserve the requestId when retrying.`)),
+      () => finish(new Error(`T3 ${tag} timed out; inspect the service and retry the check.`)),
       timeoutMs,
     );
     try {
@@ -206,55 +168,6 @@ export function providerSummary(config) {
   }));
 }
 
-function savedProjectModel(config, project) {
-  if (!project) return null;
-  const settings = config.settings;
-  const overrides = settings?.projectSettingsOverrides?.[project.id];
-  if (overrides && Object.hasOwn(overrides, "defaultModelSelection"))
-    return overrides.defaultModelSelection;
-  // After the one-time fold, aggregate fields can be stale: a reset removes the
-  // canonical override and must not resurrect the old saved project selection.
-  if (settings?.projectSettingsFolded) return null;
-  return project.defaultModelSelection ?? null;
-}
-
-function normalizeRequest(input) {
-  for (const key of ["requestId", "cwd", "ref", "title", "prompt"]) required(input[key], key);
-  if (!["worktree", "local"].includes(input.workspace ?? "worktree"))
-    throw new Error("workspace must be worktree or local.");
-  if (
-    !["approval-required", "auto-accept-edits", "auto", "full-access"].includes(
-      input.runtimeMode ?? "approval-required",
-    )
-  )
-    throw new Error("Invalid runtimeMode.");
-  if (!["default", "plan"].includes(input.interactionMode ?? "default"))
-    throw new Error("Invalid interactionMode.");
-  if (input.modelSelection) {
-    required(input.modelSelection.instanceId, "modelSelection.instanceId");
-    required(input.modelSelection.model, "modelSelection.model");
-  }
-  return {
-    ...input,
-    workspace: input.workspace ?? "worktree",
-    runtimeMode: input.runtimeMode ?? "approval-required",
-    interactionMode: input.interactionMode ?? "default",
-  };
-}
-
-// V1 thread details are {thread}; V2 are {projection:{thread, runs, messages, providerSessions}}.
-export function readThreadDetail(detail) {
-  if (!detail) return null;
-  if (!detail.projection) return detail.thread ?? null;
-  const { thread, runs = [], messages = [], providerSessions = [] } = detail.projection;
-  return {
-    ...thread,
-    messages,
-    latestRun: [...runs].sort((a, b) => b.ordinal - a.ordinal)[0] ?? null,
-    lastError: providerSessions.find((s) => s.lastError)?.lastError ?? null,
-  };
-}
-
 const V2_BUSY = ["preparing", "queued", "starting", "running", "waiting"];
 export function busyThreads(shell, protocol) {
   if (protocol < 2)
@@ -275,24 +188,9 @@ export function busyThreads(shell, protocol) {
   );
 }
 
-export function executionStatus(thread) {
-  if (!thread) return "accepted";
-  if (thread.latestRun !== undefined) {
-    const status = thread.latestRun?.status;
-    if (status === "failed") return "failed";
-    if (status === "completed") return "completed";
-    if (["interrupted", "cancelled", "rolled_back"].includes(status)) return "interrupted";
-    if (["preparing", "starting", "running", "waiting"].includes(status)) return "started";
-    return "accepted";
-  }
-  if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "failed";
-  if (thread.latestTurn?.state === "completed") return "completed";
-  if (thread.latestTurn?.state === "interrupted") return "interrupted";
-  if (thread.session?.status === "running" && thread.session?.activeTurnId) return "started";
-  return "accepted";
-}
-
-export async function run(options, input, dependencies = {}) {
+export async function run(options, dependencies = {}) {
+  if (!["check", "idle"].includes(options.action))
+    return { status: "error", error: "Choose check or idle; agent launches use T3 Code MCP tools." };
   const fetcher = dependencies.fetch ?? globalThis.fetch;
   const execute = dependencies.exec ?? exec;
   const getConfig = dependencies.getConfig ?? readServerConfig;
@@ -306,17 +204,14 @@ export async function run(options, input, dependencies = {}) {
         return false;
       }
     });
-  const pause = dependencies.pause ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const base = origin(options.origin);
-  const watch = origin(options.watchOrigin ?? base);
   const homeDir = await realpath(options.homeDir);
   let bearer;
   let sessionId;
   let output;
-  let receipt;
   let cleanupWarning;
   let protocol = 1;
-  const http = async (path, init = {}, allowMissing = false) => {
+  const http = async (path, init = {}) => {
     let response;
     try {
       response = await fetcher(new URL(path, base), {
@@ -326,16 +221,15 @@ export async function run(options, input, dependencies = {}) {
         headers: {
           "Content-Type": "application/json",
           ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
-        ...(protocol >= 2 ? { "x-t3-orchestration-protocol": String(protocol) } : {}),
+          ...(protocol >= 2 ? { "x-t3-orchestration-protocol": String(protocol) } : {}),
           ...init.headers,
         },
       });
     } catch {
       throw new Error(
-        `T3 ${path.split("?")[0]} transport failed; keep the same requestId when retrying.`,
+        `T3 ${path.split("?")[0]} transport failed; inspect the service and retry the check.`,
       );
     }
-    if (allowMissing && response.status === 404) return null;
     if (!response.ok)
       throw new Error(
         `T3 ${path.split("?")[0]} returned HTTP ${response.status}; inspect server logs.`,
@@ -377,10 +271,8 @@ export async function run(options, input, dependencies = {}) {
     if (![1, 2].includes(protocol))
       throw new Error(`Unsupported T3 orchestration protocol ${protocol}; update ko-session.mjs.`);
     const rpc = (tag, payload, rpcOptions = {}) =>
-      callRpc(http, base, tag, payload, { ...rpcOptions, orchestrationProtocol: protocol });
-    const readConfig = () => getConfig(http, base, undefined, protocol);
-    const readThread = async (threadId) =>
-      readThreadDetail(await http(`/api/orchestration/threads/${threadId}`, {}, true));
+      callRpc(http, base, tag, payload, { WebSocketClass: dependencies.WebSocketClass, ...rpcOptions, orchestrationProtocol: protocol });
+    const readConfig = () => getConfig(http, base, dependencies.WebSocketClass, protocol);
     let issued;
     try {
       issued = JSON.parse(
@@ -395,15 +287,19 @@ export async function run(options, input, dependencies = {}) {
     bearer = required(issued.token, "issued token");
     const shell = await http("/api/orchestration/shell");
     if (!Array.isArray(shell.projects)) throw new Error("Unsupported T3 shell response.");
-    if (options.action === 'idle') {
-      const metadata = await rpc('subscribeTerminalMetadata',{}, {firstChunk:true});
-      if (metadata?.type !== 'snapshot' || !Array.isArray(metadata.terminals) || !Array.isArray(shell.threads))
-        throw new Error('Unsupported idle snapshot; activation is blocked.');
+    if (options.action === "idle") {
+      const metadata = await rpc("subscribeTerminalMetadata", {}, { firstChunk: true });
+      if (metadata?.type !== "snapshot" || !Array.isArray(metadata.terminals) || !Array.isArray(shell.threads))
+        throw new Error("Unsupported idle snapshot; activation is blocked.");
       const threads = busyThreads(shell, protocol);
-      const busyTerminals = metadata.terminals.filter(t => t.hasRunningSubprocess || t.status === 'starting');
-      output = {status:threads.length || busyTerminals.length ? 'busy' : 'idle', environmentId:descriptor.environmentId,
-        busyThreads:threads.map(t=>t.id), busyTerminals:busyTerminals.map(t=>t.terminalId)};
-    } else if (options.action === "check") {
+      const busyTerminals = metadata.terminals.filter(t => t.hasRunningSubprocess || t.status === "starting");
+      output = {
+        status: threads.length || busyTerminals.length ? "busy" : "idle",
+        environmentId: descriptor.environmentId,
+        busyThreads: threads.map(t => t.id),
+        busyTerminals: busyTerminals.map(t => t.terminalId),
+      };
+    } else {
       const providers = providerSummary(await readConfig());
       output = {
         status: "healthy",
@@ -412,234 +308,6 @@ export async function run(options, input, dependencies = {}) {
         serverVersion: descriptor.serverVersion,
         providers,
       };
-    } else {
-      const request = normalizeRequest(input);
-      const requestHash = hash(
-        canonical({ environmentId: options.environmentId, origin: base, request }),
-      );
-      const receiptsDir = join(homeDir, "ko-launches");
-      const receiptPath = join(receiptsDir, `${hash(request.requestId)}.json`);
-      try {
-        receipt = JSON.parse(await readFile(receiptPath, "utf8"));
-      } catch (e) {
-        if (e.code !== "ENOENT") throw e;
-      }
-      if (receipt && receipt.requestHash !== requestHash)
-        throw new Error(
-          "requestId already belongs to different input; reuse its original request or intentionally choose a new ID.",
-        );
-      const report = async (thread, sequence) => ({
-        requestId: request.requestId,
-        environmentId: options.environmentId,
-        projectId: receipt.projectId,
-        threadId: receipt.command.threadId,
-        status: executionStatus(thread),
-        sequence,
-        cwd: thread?.worktreePath ?? receipt.cwd,
-        ref: thread?.branch ?? receipt.ref,
-        url: `${watch}/${encodeURIComponent(options.environmentId)}/${encodeURIComponent(receipt.command.threadId)}`,
-        ...((thread?.session?.lastError ?? thread?.lastError)
-          ? { error: thread.session?.lastError ?? thread.lastError }
-          : {}),
-      });
-      let thread = receipt ? await readThread(receipt.command.threadId) : null;
-      const messageId =
-        receipt?.command.message?.messageId ?? receipt?.command.initialMessage?.messageId;
-      const messageAlreadyStored = thread?.messages?.some((m) => m.id === messageId);
-      if (messageAlreadyStored) {
-        output = await report(thread);
-      } else {
-        // A receipt replays its exact command, which only its own protocol accepts.
-        if (receipt && (receipt.version === 2) !== (protocol >= 2))
-          throw new Error(
-            "This requestId was prepared for another T3 orchestration protocol and has not started; intentionally choose a new requestId.",
-          );
-        if (!receipt) {
-          const cwd = await realpath(request.cwd);
-          const git = async (...args) =>
-            (
-              await execute("git", ["-C", cwd, ...args], { timeout: 10000, windowsHide: true })
-            ).stdout.trim();
-          const currentCommit = await git("rev-parse", "HEAD");
-          const intendedCommit = await git("rev-parse", "--verify", `${request.ref}^{commit}`);
-          if (currentCommit !== intendedCommit)
-            throw new Error(
-              "Checkout HEAD differs from the requested ref; verify KO worktree documentation before launching.",
-            );
-          const matches = [];
-          for (const project of shell.projects.filter((p) => !p.deletedAt)) {
-            try {
-              if ((await realpath(project.workspaceRoot)) === cwd) matches.push(project);
-            } catch {
-              /* Historical project path. */
-            }
-          }
-          if (matches.length > 1)
-            throw new Error(
-              "Multiple T3 projects use this checkout; resolve the duplicate project records before launch.",
-            );
-          const project = matches[0];
-          const config = await readConfig();
-          const modelSelection = request.modelSelection ?? savedProjectModel(config, project);
-          const providers = providerSummary(config);
-          if (!modelSelection)
-            throw new Error(
-              `Choose modelSelection or save a project default first. Available providers/models: ${JSON.stringify(providers)}`,
-            );
-          const provider = providers.find(
-            (p) => p.instanceId === (modelSelection.instanceId ?? modelSelection.provider),
-          );
-          if (!provider?.ready)
-            throw new Error(
-              `Selected provider is not ready. Provider status: ${JSON.stringify(providers)}`,
-            );
-          if (!provider.models.includes(modelSelection.model))
-            throw new Error(
-              `Selected model is not in the provider catalog. Available models: ${provider.models.join(", ")}`,
-            );
-          const key = `${options.environmentId}:${request.requestId}`;
-          const projectKey = `${options.environmentId}:${process.platform === "win32" ? cwd.toLowerCase() : cwd}`;
-          const projectId = project?.id ?? id("project", projectKey);
-          const createdAt = new Date().toISOString();
-          const threadId = id("thread", key);
-          const branch =
-            request.workspace === "worktree" ? `ko/${hash(key).slice(0, 16)}` : request.ref;
-          const selection = {
-            ...modelSelection,
-            instanceId: modelSelection.instanceId ?? modelSelection.provider,
-          };
-          delete selection.provider;
-          const prepared = {
-            requestHash,
-            cwd,
-            ref: request.ref,
-            headCommit: currentCommit,
-            workspace: request.workspace,
-            projectId,
-            projectCommand: project
-              ? null
-              : {
-                  type: "project.create",
-                  commandId: id("project-command", projectKey),
-                  projectId,
-                  title: request.projectTitle ?? request.title,
-                  workspaceRoot: cwd,
-                  ...(protocol >= 2 ? {} : { createdAt }),
-                },
-          };
-          receipt = protocol >= 2 ? {
-            version: 2,
-            ...prepared,
-            command: {
-              commandId: id("turn-command", key),
-              threadId,
-              projectId,
-              title: request.title,
-              modelSelection: selection,
-              runtimeMode: request.runtimeMode,
-              interactionMode: request.interactionMode,
-              workspaceStrategy:
-                request.workspace === "worktree"
-                  ? { type: "worktree", baseRef: currentCommit, branch, startFromOrigin: false }
-                  : { type: "root", branch: request.ref },
-              initialMessage: { messageId: id("message", key), text: request.prompt, attachments: [] },
-            },
-          } : {
-            version: 1,
-            ...prepared,
-            command: {
-              type: "thread.turn.start",
-              commandId: id("turn-command", key),
-              threadId,
-              message: {
-                messageId: id("message", key),
-                role: "user",
-                text: request.prompt,
-                attachments: [],
-              },
-              modelSelection: selection,
-              runtimeMode: request.runtimeMode,
-              interactionMode: request.interactionMode,
-              createdAt,
-              bootstrap: {
-                createThread: {
-                  projectId,
-                  title: request.title,
-                  modelSelection: selection,
-                  runtimeMode: request.runtimeMode,
-                  interactionMode: request.interactionMode,
-                  branch: request.workspace === "local" ? request.ref : null,
-                  worktreePath: null,
-                  createdAt,
-                },
-                runSetupScript: false,
-                ...(request.workspace === "worktree"
-                  ? {
-                      prepareWorktree: {
-                        projectCwd: cwd,
-                        baseBranch: currentCommit,
-                        branch,
-                        startFromOrigin: false,
-                      },
-                    }
-                  : {}),
-              },
-            },
-          };
-          await mkdir(receiptsDir, { recursive: true, mode: 0o700 });
-          try {
-            await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n", {
-              flag: "wx",
-              mode: 0o600,
-            });
-          } catch (e) {
-            if (e.code !== "EEXIST") throw e;
-            receipt = JSON.parse(await readFile(receiptPath, "utf8"));
-            if (receipt.requestHash !== requestHash)
-              throw new Error("Concurrent requestId collision.");
-          }
-        }
-        if (receipt.workspace === "local") {
-          const currentCommit = (
-            await execute("git", ["-C", receipt.cwd, "rev-parse", "HEAD"], {
-              timeout: 10000,
-              windowsHide: true,
-            })
-          ).stdout.trim();
-          if (currentCommit !== receipt.headCommit)
-            throw new Error(
-              "Local checkout moved since this request was prepared; inspect it before intentionally creating another request.",
-            );
-        }
-        // Protocol 2 project creation is not idempotent; a retry finds the project in the shell.
-        if (
-          receipt.projectCommand &&
-          !(protocol >= 2 && shell.projects.some((p) => p.id === receipt.projectId))
-        )
-          await http(protocol >= 2 ? "/api/projects/mutate" : "/api/orchestration/dispatch", {
-            method: "POST",
-            body: JSON.stringify(receipt.projectCommand),
-          });
-        // HTTP dispatch bypasses the UI's bootstrap handler. Thread/worktree bootstrap
-        // must use this normal WebSocket RPC, the same path as the T3 composer. Protocol 2
-        // launches through the server, which deduplicates retries by commandId.
-        const dispatchTurn =
-          dependencies.dispatchTurn ??
-          ((command) =>
-            rpc(
-              protocol >= 2 ? "orchestration.launchThread" : "orchestration.dispatchCommand",
-              command,
-              { timeoutMs: 55000 },
-            ));
-        const { sequence } = await dispatchTurn(receipt.command);
-        const deadline = Date.now() + (options.waitMs ?? 15000);
-        do {
-          thread = await readThread(receipt.command.threadId);
-          if (executionStatus(thread) !== "accepted" || Date.now() >= deadline) break;
-          await pause(500);
-        } while (true);
-        output = await report(thread, sequence);
-      }
     }
   } catch (e) {
     // Never propagate CLI stdout/stderr or the WebSocket URL (both may contain credentials).
@@ -648,14 +316,6 @@ export async function run(options, input, dependencies = {}) {
     output = {
       status: "error",
       error: safeMessage,
-      ...(input?.requestId
-        ? {
-            requestId: input.requestId,
-            retry:
-              "Reuse this requestId and identical request; do not start a new attempt after an uncertain result.",
-          }
-        : {}),
-      ...(receipt?.command?.threadId ? { threadId: receipt.command.threadId } : {}),
     };
   } finally {
     if (sessionId) {
@@ -679,27 +339,11 @@ async function main() {
       process.stdout.write(help);
       return;
     }
-    let input;
-    if (options.action === "start") {
-      const text =
-        options.request === "-"
-          ? await new Promise((res, rej) => {
-              let content = "";
-              process.stdin.setEncoding("utf8");
-              process.stdin.on("data", (chunk) => {
-                content += chunk;
-              });
-              process.stdin.on("end", () => res(content));
-              process.stdin.on("error", rej);
-            })
-          : await readFile(options.request, "utf8");
-      input = JSON.parse(text);
-    }
-    const result = await run(options, input);
+    const result = await run(options);
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    if (["error", "failed"].includes(result.status)) process.exitCode = 1;
+    if (result.status === "error") process.exitCode = 1;
   } catch {
-    process.stderr.write("Invalid invocation or unreadable request; use --help.\n");
+    process.stderr.write("Invalid invocation; use --help.\n");
     process.exitCode = 1;
   }
 }

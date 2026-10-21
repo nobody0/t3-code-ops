@@ -140,11 +140,6 @@ for (const file of NodeFS.readdirSync(NodePath.join(staging, "dist"), { recursiv
   );
   if (imported) throw new Error(`The CLI bundle imports workspace package ${imported} at runtime.`);
 }
-// The launch helper is dependency-free and travels with the verified runtime.
-NodeFS.copyFileSync(
-  NodePath.join(opsRoot, "scripts/ko-session.mjs"),
-  NodePath.join(staging, "dist/ko-session.mjs"),
-);
 // npm does not apply pnpm patches. Preserve patched external JS wrappers next to
 // the bundle; platform-specific native siblings still install on the target.
 const externals = selectCliRuntimeExternalDependencies(serverPackage.dependencies);

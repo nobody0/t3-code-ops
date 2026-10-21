@@ -10,7 +10,7 @@ Candidate IDs contain both source and operations commits. Unchanged successful c
 
 GitHub can disable public-repository schedules after 60 days without repository activity. The observer marks preparation stale after eight hours instead of showing a false all-clear. If disabled, an agent re-enables `prepare.yml` and starts a check. See [GitHub's scheduling rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
 
-`scripts/build-ko-release.mjs SOURCE OUTPUT` requires a clean published source; `T3_SOURCE_REF` selects an explicit candidate ref. The compatibility helper still ships at `node_modules/t3/dist/ko-session.mjs`. The maintained copy is separately installed at `tools/scripts/ko-session.mjs` under each deployment root.
+`scripts/build-ko-release.mjs SOURCE OUTPUT` requires a clean published source; `T3_SOURCE_REF` selects an explicit candidate ref. `tools/scripts/ko-session.mjs` under each deployment root is an operations-only helper with `check` and `idle` release gates. It does not launch agents or maintain launch receipts, and new runtime archives do not bundle it. Agent launches and delegation use T3's native MCP tools through the target environment's authorized connection; see KO's `t3-work` skill.
 
 ## Agent rollout
 
