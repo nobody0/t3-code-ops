@@ -74,7 +74,7 @@ jobs:
       - name: Verify ownership guards
         # The root test config loads every workspace project, including the uninstalled mobile app.
         working-directory: work/source/apps/server
-        run: node ../../node_modules/vite-plus/bin/vp test run src/cli/update.test.ts src/cloud/bootService.test.ts src/cloud/selfUpdate.test.ts
+        run: node ../../node_modules/vite-plus/bin/vp test run src/cli/update.test.ts src/cloud/bootService.test.ts src/cloud/selfUpdate.test.ts src/serverRuntimeState.test.ts
       - name: Build the published candidate
         env:
           T3_SOURCE_REF: ${{ needs.prepare.outputs.source_ref }}
