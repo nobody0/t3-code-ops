@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
       - name: Configure fork repository access
         env:
           CANDIDATE_KEY: ${{ secrets.T3_FORK_DEPLOY_KEY }}
@@ -66,14 +66,15 @@ jobs:
           path: work/source
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
       - run: npm install -g corepack@0.35.0
       - run: node --test scripts/*.test.mjs
       - working-directory: work/source
         run: corepack pnpm --filter @t3tools/monorepo --filter @t3tools/web... --filter t3... --filter @t3tools/scripts... --filter @t3tools/oxlint-plugin-t3code... install --frozen-lockfile
       - name: Verify ownership guards
-        working-directory: work/source
-        run: node node_modules/vite-plus/bin/vp test run apps/server/src/cli/update.test.ts apps/server/src/cloud/bootService.test.ts apps/server/src/cloud/selfUpdate.test.ts
+        # The root test config loads every workspace project, including the uninstalled mobile app.
+        working-directory: work/source/apps/server
+        run: node ../../node_modules/vite-plus/bin/vp test run src/cli/update.test.ts src/cloud/bootService.test.ts src/cloud/selfUpdate.test.ts
       - name: Build the published candidate
         env:
           T3_SOURCE_REF: ${{ needs.prepare.outputs.source_ref }}
@@ -95,7 +96,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
       - uses: actions/download-artifact@v4
         with:
           name: runtime
@@ -119,7 +120,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
       - uses: actions/download-artifact@v4
         with:
           name: preparation-report
