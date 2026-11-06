@@ -76,7 +76,10 @@ export async function rehearseMigrations(c,target,safety) {
   if(!safety.before) return;
   verifyMigrationSource(c,target);
   const script=path.resolve(import.meta.dirname,'../rehearse-migrations.mjs');
-  const report=parseMigrationReport(run(c.node,[script,c.migrationSource,safety.backup],{timeout:120000}));
+  // Large stopped-home snapshots can need several minutes just for integrity
+  // verification. Keep a finite ceiling without aborting an otherwise valid
+  // rehearsal at the general command runner's two-minute default.
+  const report=parseMigrationReport(run(c.node,[script,c.migrationSource,safety.backup],{timeout:30*60_000}));
   atomicJson(path.join(safety.backup,'migration-report.json'),report);
 }
 export function parseMigrationReport(stdout) {

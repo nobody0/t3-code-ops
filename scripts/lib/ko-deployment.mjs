@@ -197,7 +197,9 @@ export async function smoke(c, target) {
     }
     NodeFS.closeSync(log);
     // Only the mkdtemp directory created by this invocation is removed.
-    NodeFS.rmSync(directory, { recursive: true });
+    // Windows can retain a directory handle briefly after the child exits.
+    // Retry transient EPERM/EBUSY failures before rejecting a healthy trial.
+    NodeFS.rmSync(directory, { recursive: true, maxRetries: 8, retryDelay: 250 });
   }
 }
 function restore(c, previous) {

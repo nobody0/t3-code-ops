@@ -247,6 +247,25 @@ NodeTest.test(
   },
 );
 NodeTest.test(
+  "isolated smoke cleanup tolerates a Windows file handle closing after server exit",
+  { skip: process.platform !== "win32", timeout: 30000 },
+  async (t) => {
+    const { c, target } = setup(t);
+    NodeFS.writeFileSync(
+      NodePath.join(target, "node_modules/t3/dist/bin.mjs"),
+      `import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {setTimeout as delay} from 'node:timers/promises';
+const quote=value=>"'"+value.replaceAll("'","''")+"'";
+const lock=path.join(process.cwd(),'held-file'),ready=path.join(process.cwd(),'locker-ready');
+const script="$ErrorActionPreference='Stop';$owner=Get-Process -Id "+process.pid+";$stream=[IO.File]::Open("+quote(lock)+",[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);try{[IO.File]::WriteAllText("+quote(ready)+",'ready');$owner.WaitForExit(15000)|Out-Null;Start-Sleep -Milliseconds 750}finally{$stream.Dispose()}";
+spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{stdio:'ignore',windowsHide:true});
+const end=Date.now()+10000;while(!fs.existsSync(ready)){if(Date.now()>end)throw Error('File-lock fixture did not start');await delay(25);}
+const arg=n=>process.argv[process.argv.indexOf(n)+1];http.createServer((_req,res)=>res.end('test release')).listen(Number(arg('--port')),'127.0.0.1');`,
+    );
+    await smoke(c, target);
+    NodeAssert.equal(NodeFS.readdirSync(c.root).some((name) => name.startsWith("smoke-")), false);
+  },
+);
+NodeTest.test(
   "disposable native service starts a Node package and rolls back first installation",
   {
     skip: !["win32", "darwin"].includes(process.platform) || process.env.KO_TEST_NATIVE !== "1",
