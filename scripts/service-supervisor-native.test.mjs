@@ -41,7 +41,7 @@ test(
           : process.platform === "darwin"
             ? path.join(os.homedir(), "Library/LaunchAgents")
             : path.join(root, "tasks"),
-      userName: `${process.env.USERDOMAIN}\\${process.env.USERNAME}`,
+      userName: process.platform === "win32" ? run("whoami.exe", []) : undefined,
       supervision: { startupGraceMs: 0, intervalMs: 100, failureLimit: 2, failureSpanMs: 100 },
     };
     fs.mkdirSync(path.join(c.baseDir, "userdata"), { recursive: true });
@@ -57,7 +57,12 @@ test(
       `import http from 'node:http';import fs from 'node:fs';import path from 'node:path';const arg=k=>process.argv[process.argv.indexOf(k)+1];const home=arg('--base-dir');http.createServer((req,res)=>{console.log('fixture request '+process.pid);if(fs.existsSync(path.join(home,'hang')))return;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({environmentId:'fixture'}));}).listen(Number(arg('--port')),'127.0.0.1');`,
     );
     const adapter = platformAdapter(c);
+    let completed = false;
     t.after(() => {
+      if (!completed && fs.existsSync(path.join(root, "service-supervisor.log")))
+        t.diagnostic(
+          fs.readFileSync(path.join(root, "service-supervisor.log"), "utf8").slice(-4000),
+        );
       try {
         adapter.stop();
       } catch {
@@ -92,12 +97,12 @@ test(
         "[Unit]\nConditionPathExists=!" + path.join(root, "service-stopped") + "\n",
       );
     }
-  c.initialCli=[c.node,cli];
-  atomicJson(path.join(root,'config.json'),c);
-  const installer=path.join(import.meta.dirname,'install-t3-supervisor.mjs');
-  run(c.node,[installer,path.join(root,'config.json')]);
-  // Re-running cleanup must succeed after the old watchdog is already absent.
-  run(c.node,[installer,path.join(root,'config.json')]);
+    c.initialCli = [c.node, cli];
+    atomicJson(path.join(root, "config.json"), c);
+    const installer = path.join(import.meta.dirname, "install-t3-supervisor.mjs");
+    run(c.node, [installer, path.join(root, "config.json")]);
+    // Re-running cleanup must succeed after the old watchdog is already absent.
+    run(c.node, [installer, path.join(root, "config.json")]);
     const read = () => JSON.parse(fs.readFileSync(path.join(root, "service-runtime.json"), "utf8"));
     const ready = async () => {
       for (let i = 0; i < 100; i++) {
@@ -110,14 +115,16 @@ test(
         await delay(100);
       }
       const log = path.join(root, "service-supervisor.log");
-      throw Error("fixture not ready\n" + (fs.existsSync(log) ? fs.readFileSync(log, "utf8").slice(-4000) : "no supervisor log"));
+      throw Error(
+        "fixture not ready\n" +
+          (fs.existsSync(log) ? fs.readFileSync(log, "utf8").slice(-4000) : "no supervisor log"),
+      );
     };
     await ready();
     const first = read();
     assert.equal(String(first.pid), adapter.info().pid);
     assert.ok(first.childPid);
-    const supervisorLog = () =>
-      fs.readFileSync(path.join(root, "service-supervisor.log"), "utf8");
+    const supervisorLog = () => fs.readFileSync(path.join(root, "service-supervisor.log"), "utf8");
     const until = async (condition, message) => {
       for (let i = 0; i < 150; i++) {
         if (await condition()) return;
@@ -208,5 +215,6 @@ test(
     assert.equal(String(resumed.pid), adapter.info().pid);
     adapter.stop();
     assert.equal(fs.existsSync(path.join(root, "service-runtime.json")), false);
+    completed = true;
   },
 );

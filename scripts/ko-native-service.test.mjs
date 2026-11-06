@@ -16,6 +16,7 @@ import {
 } from "./lib/ko-service-platforms.mjs";
 import { atomicJson, run } from "./lib/ko-release.mjs";
 import { smoke } from "./lib/ko-deployment.mjs";
+import { activateTransaction } from "./lib/ko-activation.mjs";
 
 function setup(t, platform = "win32") {
   const temporary = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ko-native-test-"));
@@ -125,10 +126,14 @@ NodeTest.test(
           ${script}
           @{state=$script:state;stopRequested=$script:stopRequested}|ConvertTo-Json -Compress
         `;
-        observed = JSON.parse(run("powershell.exe", [
-          "-NoProfile", "-NonInteractive", "-EncodedCommand",
-          Buffer.from(fixture, "utf16le").toString("base64"),
-        ]));
+        observed = JSON.parse(
+          run("powershell.exe", [
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            Buffer.from(fixture, "utf16le").toString("base64"),
+          ]),
+        );
       },
     });
     adapter.stop();
@@ -262,7 +267,10 @@ const end=Date.now()+10000;while(!fs.existsSync(ready)){if(Date.now()>end)throw 
 const arg=n=>process.argv[process.argv.indexOf(n)+1];http.createServer((_req,res)=>res.end('test release')).listen(Number(arg('--port')),'127.0.0.1');`,
     );
     await smoke(c, target);
-    NodeAssert.equal(NodeFS.readdirSync(c.root).some((name) => name.startsWith("smoke-")), false);
+    NodeAssert.equal(
+      NodeFS.readdirSync(c.root).some((name) => name.startsWith("smoke-")),
+      false,
+    );
   },
 );
 NodeTest.test(
@@ -273,8 +281,7 @@ NodeTest.test(
   },
   async (t) => {
     const { c, releaseId, target } = setup(t, process.platform);
-    if (process.platform === "win32")
-      c.userName = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
+    if (process.platform === "win32") c.userName = run("whoami.exe", []);
     else delete c.userName;
     const socket = NodeNet.createServer();
     socket.listen(0, "127.0.0.1");
@@ -294,6 +301,61 @@ NodeTest.test(
     });
     NodeAssert.equal(nativeRecovery(c).transaction.phase, "active");
     NodeAssert.equal(adapter.info().state, "active");
+    const activeJournal = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(c.root, "activation.json"), "utf8"),
+    );
+    const lock = NodePath.join(c.root, "activation.lock");
+    NodeFS.writeFileSync(lock, String(process.pid), { flag: "wx" });
+    try {
+      await NodeAssert.rejects(
+        activateTransaction(
+          c,
+          {
+            phase: "pending",
+            releaseId: "candidate-that-never-started",
+            config: c,
+            previous: { target, service: adapter.capture(), indexHash: "fixture" },
+          },
+          {
+            target,
+            stop: () => adapter.stop(),
+            install: () => NodeAssert.fail("candidate must not launch"),
+            resumePrevious: async () => {
+              adapter.start();
+              const end = Date.now() + 30_000;
+              while (Date.now() < end) {
+                try {
+                  if ((await (await fetch(`http://127.0.0.1:${c.port}`)).text()) === "test release")
+                    return;
+                } catch {}
+                await new Promise((r) => setTimeout(r, 100));
+              }
+              throw Error("previous wrapper did not resume");
+            },
+            healthy: () => {},
+            restoreEmpty: () => NodeAssert.fail("no rollback"),
+          },
+          {
+            assertIdle: async () => {},
+            databaseState: () => ({ integrity: "ok" }),
+            assertStopped: async () => {},
+            snapshotStoppedHome: () => ({ backup: "fixture", before: {} }),
+            rehearseMigrations: () => {
+              throw Error("rehearsal fixture failed");
+            },
+            liveDatabase: () => true,
+          },
+        ),
+        /rehearsal fixture failed/,
+      );
+      NodeAssert.deepEqual(
+        JSON.parse(NodeFS.readFileSync(NodePath.join(c.root, "activation.json"), "utf8")),
+        activeJournal,
+      );
+      NodeAssert.equal(adapter.info().state, "active");
+    } finally {
+      NodeFS.rmSync(lock, { force: true });
+    }
     await nativeManage(c, "rollback");
     NodeAssert.equal(nativeRecovery(c).transaction.phase, "rolled-back");
     NodeAssert.equal(adapter.capture().definition, null);

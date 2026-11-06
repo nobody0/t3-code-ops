@@ -7,8 +7,10 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, run, verifyInstalled } from "./ko-release.mjs";
 import { nativeManage, nativeStatus, nativeRecovery } from "./ko-deployment-native.mjs";
-import {ensureSupervisor,renderSystemdOverride} from './ko-service-platforms.mjs';
-import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
+import { activateTransaction } from "./ko-activation.mjs";
+import { acquireMaintenance } from "./ko-maintenance.mjs";
+import { ensureSupervisor, renderSystemdOverride } from "./ko-service-platforms.mjs";
+import { assertIdle, requireSafeBinaryRollback, verifyMigrationSource } from "./ko-safety.mjs";
 
 export function loadConfig(path) {
   const config = readJson(path);
@@ -248,7 +250,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
         `Deployment identity changed (${configMismatch.join(", ")}); use the recorded configuration for recovery.`,
       );
     if (operation === "rollback") {
-      requireSafeBinaryRollback(c,transaction);
+      requireSafeBinaryRollback(c, transaction);
       if (!transaction) throw new Error("No deployment to roll back.");
       const journal = transaction;
       if (journal.phase === "rolled-back") throw new Error("Already rolled back.");
@@ -259,7 +261,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       return;
     }
     if (operation !== "activate") throw new Error("Unknown operation.");
-    if (['pending','recovery-required'].includes(transaction?.phase))
+    if (["pending", "recovery-required"].includes(transaction?.phase))
       throw new Error("Interrupted activation or rollback: run rollback first.");
     if (typeof releaseId !== "string" || !/^[0-9][0-9A-Za-z.+-]*$/.test(releaseId))
       throw new Error("Invalid release ID.");
@@ -272,7 +274,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
         "Upstream version changed: review migrations and recovery before changing baselineVersion.",
       );
     if (linkTarget(c) === target) throw new Error("Release already selected.");
-    verifyMigrationSource(c,target);
+    verifyMigrationSource(c, target);
     await trial(c, target);
     await assertIdle(c);
     const previous = {
@@ -282,49 +284,34 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
     };
     if (control(c, "is-active") !== "active") throw new Error("Existing service is not active.");
     const journal = { schemaVersion: 1, config: c, phase: "pending", releaseId, previous };
-    atomicJson(journalPath(c), journal);
-    try {
-      if (databaseState(c.baseDir)) {
-        await assertIdle(c);
-        control(c,'stop');
-        if(control(c,'show','--property=ActiveState','--value')==='active') throw new Error('Service did not stop; backup refused.');
-        await assertStopped(c);
-        journal.safety=snapshotStoppedHome(c,previous);
-        atomicJson(journalPath(c),journal);
-        await rehearseMigrations(c,target,journal.safety);
-      }
-      setCurrent(c, target);
-      ensureSupervisor(c);
-      writeOverride(
-        c,
-        renderSystemdOverride(c,target),
-      );
-      run("systemctl", ["--user", "daemon-reload"]);
-      control(c, "restart");
-      await healthy(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")));
-      atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
-    } catch (error) {
-      if (liveDatabase(c.baseDir)) {
-        let stopFailure;
-        try {control(c,'stop');} catch(e) {stopFailure=e.message;}
-        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});
-        throw new Error('Activation failed; automatic binary rollback disabled. Review the backup and database before agent recovery.',{cause:error});
-      }
-      try {
-        await recover(c, previous);
-        await healthy(c, previous.indexHash);
-        atomicJson(journalPath(c), { ...journal, phase: "rolled-back", failure: error.message });
-      } catch (recovery) {
-        throw new AggregateError(
-          [error, recovery],
-          "Activation and rollback failed; transaction retained for manual recovery.",
-          { cause: recovery },
-        );
-      }
-      throw new Error(`Activation failed; previous service restored: ${error.message}`, {
-        cause: error,
-      });
-    }
+    await activateTransaction(
+      c,
+      journal,
+      {
+        target,
+        stop: () => control(c, "stop"),
+        acquireMaintenance: dependencies.acquireMaintenance ?? (() => acquireMaintenance(c)),
+        resumePrevious: async () => {
+          if (control(c, "is-active") !== "active") control(c, "start");
+          await healthy(c, previous.indexHash);
+        },
+        install: () => {
+          setCurrent(c, target);
+          ensureSupervisor(c);
+          writeOverride(c, renderSystemdOverride(c, target));
+          run("systemctl", ["--user", "daemon-reload"]);
+          control(c, "restart");
+        },
+        healthy: () =>
+          healthy(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html"))),
+        restoreEmpty: async () => {
+          await recover(c, previous);
+          await healthy(c, previous.indexHash);
+        },
+        onPhase: dependencies.onPhase,
+      },
+      dependencies.safety,
+    );
   } finally {
     NodeFS.closeSync(fd);
     NodeFS.unlinkSync(lock);

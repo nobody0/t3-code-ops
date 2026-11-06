@@ -5,15 +5,35 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, verifyInstalled } from "./ko-release.mjs";
 import { platformAdapter, optionalFile } from "./ko-service-platforms.mjs";
-import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
+import { activateTransaction } from "./ko-activation.mjs";
+import { acquireMaintenance } from "./ko-maintenance.mjs";
+import { assertIdle, requireSafeBinaryRollback, verifyMigrationSource } from "./ko-safety.mjs";
 
 const journalPath = (c) => NodePath.join(c.root, "activation.json");
 const selectionPath = (c) => NodePath.join(c.root, "current.json");
 function selected(c) {
+  if (c.platform === "linux") {
+    try {
+      return NodeFS.realpathSync(NodePath.join(c.root, "current"));
+    } catch (e) {
+      if (e.code === "ENOENT") return null;
+      throw e;
+    }
+  }
   const contents = optionalFile(selectionPath(c));
   return contents === null ? null : JSON.parse(contents).target;
 }
 function select(c, target) {
+  if (c.platform === "linux") {
+    const current = NodePath.join(c.root, "current");
+    if (target === null) NodeFS.rmSync(current, { force: true });
+    else {
+      const temporary = current + "." + NodeCrypto.randomUUID();
+      NodeFS.symlinkSync(target, temporary);
+      NodeFS.renameSync(temporary, current);
+    }
+    return;
+  }
   if (target === null) NodeFS.rmSync(selectionPath(c), { force: true });
   else atomicJson(selectionPath(c), { target });
 }
@@ -114,7 +134,7 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
         `Deployment identity changed (${configMismatch.join(", ")}); use the recorded configuration for recovery.`,
       );
     if (operation === "rollback") {
-      requireSafeBinaryRollback(c,transaction);
+      requireSafeBinaryRollback(c, transaction);
       if (!transaction) throw new Error("No deployment to roll back.");
       if (transaction.phase === "rolled-back") throw new Error("Already rolled back.");
       atomicJson(journalPath(c), { ...transaction, phase: "pending" });
@@ -123,7 +143,7 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
       return;
     }
     if (operation !== "activate") throw new Error("Unknown operation.");
-    if (['pending','recovery-required'].includes(transaction?.phase))
+    if (["pending", "recovery-required"].includes(transaction?.phase))
       throw new Error("Interrupted activation or rollback: run rollback first.");
     if (typeof releaseId !== "string" || !/^[0-9][0-9A-Za-z.+-]*$/.test(releaseId))
       throw new Error("Invalid release ID.");
@@ -137,7 +157,7 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
       );
     if (selected(c) === target) throw new Error("Release already selected.");
     if (typeof trial !== "function") throw new Error("Isolated startup validation is required.");
-    verifyMigrationSource(c,target);
+    verifyMigrationSource(c, target);
     await trial(c, target);
     await assertIdle(c);
     const service = adapter.capture();
@@ -151,43 +171,29 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
       indexHash: exists ? await getHash(c.port) : null,
     };
     const journal = { schemaVersion: 2, config: c, phase: "pending", releaseId, previous };
-    atomicJson(journalPath(c), journal);
-    try {
-      if (databaseState(c.baseDir)) {
-        await assertIdle(c);
-        adapter.stop();
-        if(adapter.info().state==='active') throw new Error('Service did not stop; backup refused.');
-        await assertStopped(c);
-        journal.safety=snapshotStoppedHome(c,previous);
-        atomicJson(journalPath(c),journal);
-        await rehearseMigrations(c,target,journal.safety);
-      }
-      NodeFS.mkdirSync(c.baseDir, { recursive: true });
-      adapter.install(target);
-      select(c, target);
-      await health(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")));
-      atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
-    } catch (error) {
-      if (liveDatabase(c.baseDir)) {
-        let stopFailure;
-        try {adapter.stop();} catch(e) {stopFailure=e.message;}
-        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});
-        throw new Error('Activation failed; automatic binary rollback disabled. Review the backup and database before agent recovery.',{cause:error});
-      }
-      try {
-        await recover(previous);
-        atomicJson(journalPath(c), { ...journal, phase: "rolled-back", failure: error.message });
-      } catch (recovery) {
-        throw new AggregateError(
-          [error, recovery],
-          "Activation and rollback failed; transaction retained for manual recovery.",
-          { cause: recovery },
-        );
-      }
-      throw new Error(`Activation failed; previous service restored: ${error.message}`, {
-        cause: error,
-      });
-    }
+    await activateTransaction(
+      c,
+      journal,
+      {
+        target,
+        stop: () => adapter.stop(),
+        acquireMaintenance: dependencies.acquireMaintenance ?? (() => acquireMaintenance(c)),
+        resumePrevious: async () => {
+          if (adapter.info().state !== "active") adapter.start();
+          await health(c, previous.indexHash);
+        },
+        install: () => {
+          NodeFS.mkdirSync(c.baseDir, { recursive: true });
+          adapter.install(target);
+          select(c, target);
+        },
+        healthy: () =>
+          health(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html"))),
+        restoreEmpty: () => recover(previous),
+        onPhase: dependencies.onPhase,
+      },
+      dependencies.safety,
+    );
   } finally {
     NodeFS.closeSync(fd);
     NodeFS.unlinkSync(lock);

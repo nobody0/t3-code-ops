@@ -14,21 +14,54 @@ GitHub can disable public-repository schedules after 60 days without repository 
 
 ## Agent rollout
 
-1. Read the KO fleet and deployment entities, verify the target paths and refs, and obtain approval for the exact release in conversation. Check the report is ready and every target platform has a tested lock.
-2. Fetch the candidate branch and fast-forward fork main to its exact commit after reviewing the diff. If main diverged, prepare a new candidate; do not force-push or rebuild the approved artifact.
-3. Download the release archive and compare its SHA-256 with the reviewed report. Extract to a new incoming directory; keep the manifest and platform locks. Run `node tools/scripts/install-ko-release.mjs INCOMING RELEASES_ROOT`. This stages files and never restarts production.
-4. On each target prepare a clean candidate source checkout with its frozen build dependencies. Set `migrationSource` in the local deployment config to that checkout, and `baselineVersion` to the approved candidate's upstream version. This enables database-only rehearsal without adding migration commands to T3 itself.
-5. Run the external helper `check` and `idle` with the documented home, loopback origin, environment ID and installed CLI argv. Defer active turns or terminal subprocesses. Ask the user to pause new work during the brief cutover; idle checks are not an atomic application maintenance lock.
-6. Run `node tools/scripts/manage-ko-release.mjs activate CONFIG RELEASE_ID`. The manager verifies the package, isolates a startup check, rechecks idle state, stops the native service, backs up the existing home, rehearses migrations on a copy and then activates. The original home, identities, service names and Tailscale mappings stay intact.
-7. Verify authenticated API and provider readiness, DB integrity and migration report, running commit/receipt, HTTPS descriptor, frontend entry assets and stable process. Test Klarstand first, then Windows, then Caps. Stop the rollout after a failure. Update KO deployment entities with the actual result using `baseRev`; update local observer configurations with the verified commit/release.
+1. Read KO `/api/fleet`, verify documented paths/refs and device-local identities, and review the exact prepared artifact. Maintain one private inventory using [the example schema](templates/fleet.example.json). Environment UUIDs are stable keys. Array order is rollout order: put a canary before the control machine and account for provider/shutdown dependencies. Keep desired, observed, verified, tooling and availability fields separate.
+2. Review and commit operations tooling. Collect clean native evidence for each target platform with `node scripts/native-evidence.mjs PRIVATE_OUTPUT.json` (or download the prepare workflow's native evidence). Review the source customization inventory in the fork's `docs/operations/ko-fork.md`. No build, inference, OS/provider upgrade or deployment happens merely by checking status.
+3. Freeze a private plan with the command below. It pins the exact source, runtime artifact, runtime packaging operations commit, installed tooling commit, platform locks, target identities, availability, order, phase budget and deadline. Review `plan.json` before continuing. Do not edit it; create a new plan when scope changes.
+4. Run `stage`, then `launch`. Staging verifies identities and digests, installs side-by-side, and prepares a clean matching migration checkout. Configure device-local `packageManagerArgv` (argv for the pinned pnpm/Corepack JavaScript entry, including Node on Windows) if source dependencies must be installed. The finite native controller and per-device workers run outside the app/agent they replace. Heartbeats remain live during long DB work.
+5. Use `status`, `doctor` and `resume` to inspect or continue. Receipts survive lost SSH/controllers. A stale worker, failed canary, unknown activation, mismatched identity or recovery-required state halts advancement. Busy/offline targets remain deferred and the rollout stays partial. Before candidate launch, failures preserve/resume the unchanged old owner; after possible migration, binary-only rollback is blocked. The first transition from an app without the barrier requires an explicitly reviewed `--legacy-drain` plan and a quiet user window. That flag is not persisted as device policy.
+6. Require every intended device's verified receipt, then `promote` the exact source commit to fork main. Promotion rechecks device receipts and permits only a fast-forward push. Update KO deployment facts via revision-protected API. Never rebuild the approved artifact or force-push a divergent main.
+
+```sh
+node scripts/fleet.mjs plan --inventory /private/fleet.local.json --artifact /private/release --evidence /private/native-evidence --output /private/rollout --deadline 2026-11-07T12:00:00Z
+node scripts/fleet.mjs stage --plan /private/rollout/plan.json
+node scripts/fleet.mjs launch --plan /private/rollout/plan.json
+node scripts/fleet.mjs status --plan /private/rollout/plan.json
+node scripts/fleet.mjs doctor --plan /private/rollout/plan.json
+# From external SSH, or launch the native controller again after a proved dead controller:
+node scripts/fleet.mjs resume --plan /private/rollout/plan.json --wait
+node scripts/fleet.mjs promote --plan /private/rollout/plan.json --source /verified/fork-checkout
+```
+
+`doctor` separates native process, local API, HTTPS, temporary authenticated API access, provider discovery and session expiry. Discovery is not inference: receipts explicitly report inference and agent links as untested. Request and run a separate narrowly scoped provider/UI fixture when required; ordinary smoke checks never create agent threads. Browser connections and per-thread agent links are different; Labs may disable only the latter. The read-only observer accepts `inventoryFile` and optional `controllerReceipt`, consuming this same inventory instead of duplicating targets in `machines`.
+
+## New devices
+
+Provision the OS, key-only SSH, Node 24, logged-in Tailscale and the intended HTTPS mapping first. Windows/macOS require an awake device and logged-in native operator; Linux requires a working lingering user manager. Review an explicit local deployment config, including absolute root/home/Node/service paths and baseline version. Then run locally or over the documented SSH entry point:
+
+```sh
+node scripts/fleet.mjs enroll --config /private/device-config.json --artifact /private/release --name device --url https://device.example/ --ssh operator@device.example
+```
+
+Enrollment checks OS/architecture, Node, disk, Tailscale and native session prerequisites. A fresh home gets a new identity; reruns preserve identity/data and refuse changed configuration, occupied ports or duplicate ownership. Existing data without an identity requires adoption diagnosis. The command installs one native ownership chain, checks local/HTTPS access and writes `enrolled.json` with the inventory target. Provider login, browser pairing and intended agent-link Labs access remain explicit operator steps. Add the verified target to private inventory and author its KO machine/deployment through the API. A failed prerequisite is incomplete enrollment, never success.
 
 For a first Mac installation, verify architecture, launchd and the existing installation while the device is awake and the operator is logged in. Configure `initialCli` with the verified existing CLI argv and retain its original launchd definition. No startup checker installs software.
 
 ## Recovery
 
-Activation journals record the previous service, backup and before/after migration state. Backups live under the deployment root with owner-only directory permissions. Treat them as credentials; never upload them to GitHub.
+Activation journals record explicit stages, the pre-launch fence, previous journal/service and before/after migration state. Backups include both databases, identity, settings, secrets, themes, attachments and browser artifacts, plus matching runtime archives/locks, tooling and service/config metadata. Integrity manifests seal the files. Backups live under the owner-only deployment root and contain credentials; never upload them to GitHub. Logs/caches are rebuildable. Worktrees/unsynced edits and external provider/gateway homes require separate private backup policies.
 
 If an activation with a real database fails, the manager attempts to stop the candidate and records `recovery-required`. It never automatically restarts an older binary against a migrated DB. Inspect the journal and service logs. Keep both failed data and the pre-upgrade snapshot. Only restore data after proving no newer work will be lost or obtaining explicit incident-specific approval. Restore a matched database/settings/secrets/identity snapshot and its corresponding previous service, then revalidate. Binary-only rollback is reserved for disposable installations without databases. An interrupted transaction blocks a second activation.
+
+For an interrupted journal explicitly proving `candidateStarted: false`, `node scripts/manage-ko-release.mjs recover-prestart CONFIG` verifies the dead activation owner, unchanged selection/service, database integrity and old client before resuming. Unknown or migrated state is refused. A maintenance fence never expires or gets stolen automatically. Keep recovery-required candidates fenced until an operator reviews matched recovery; never clear lock files just to retry.
+
+Configure an encrypted backup destination on a verified off-device private mount and an `age` public recipient. Encryption keys remain outside snapshots/source; the command has no default destination or key. Retention deletes only its own completed verified exports. Test restoration in a new disposable directory without launching T3, providers, native services or network access:
+
+```sh
+node scripts/fleet.mjs backup --snapshot /private/stopped-snapshot --destination /off-device/encrypted --recipient age1... --keep 5
+node scripts/fleet.mjs restore-test --snapshot /private/stopped-snapshot --destination /private/new-offline-restore
+```
+
+An encrypted export has a SHA-256 sidecar. Verify it before decrypting with `age` in a private recovery directory, inspect archive paths, then run the same offline restore proof. Never bring a copied production identity online alongside its original. Full integrity/rehearsal is retained for large homes; the default activation budget is one hour and the migration worker budget is 30 minutes. Use a newly reviewed plan to change budgets, and inspect heartbeat plus stage rather than mistaking a long scan for an idle wait.
 
 ## Read-only reminder
 
@@ -59,3 +92,7 @@ If a native wrapper dies while its app wrapper runs on, the replacement does not
 `scripts/lib/service-monitor.mjs` is the common liveness/backoff implementation. KO vendors the same file under `tools/service-monitor.mjs` so either repository runs independently. Update it here, then run `node scripts/sync-service-monitor.mjs KO_ROOT`; verify parity with `--check` and review both repository changes together.
 
 Run `KO_TEST_SUPERVISOR=1 node --test scripts/service-supervisor*.test.mjs` on each target OS (PowerShell: `$env:KO_TEST_SUPERVISOR='1'`). Fixtures use disposable native services and homes to verify crash/hang recovery, wrapper adoption (on Windows also after killing only the native wrapper) and clean intentional stop. Validate production local/HTTPS descriptors and native wrapper ownership after installation; do not fault-inject or reboot an active production machine.
+
+## Client pairing
+
+`node scripts/fleet.mjs pair codes --fleet /private/fleet.local.json` issues explicitly requested single-use codes using upstream's default scopes and lifetime. Enter them at the primary workspace under **+ Add environment → Remote link**. Codes are never saved to KO or receipts. `pair sessions` reports expiry (warning below seven days) and Connections permission mismatches; `pair revoke NAME SESSION_ID...` revokes only named sessions. `--only`, repeated `--scope`, `--ttl` and `--label` remain available; the legacy helper option `--scopes standard` explicitly reduces permissions to 13. Healthy sessions are not re-paired. Default inventory: `$T3_FLEET` or `~/.config/t3-code-ko/fleet.local.json`. The original `scripts/pair-fleet.mjs` command is also supported with this same validated schema. Agent links separately require Settings → Labs → Linked environments.

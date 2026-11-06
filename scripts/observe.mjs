@@ -3,10 +3,41 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {atomicJson} from './lib/ko-release.mjs';
+import {loadInventory} from './lib/fleet-inventory.mjs';
 
 const LOG_LIMIT = 30;
 
 export async function collect(config, previous = {}, fetcher = fetch) {
+  if (config.inventoryFile) {
+    const inventory = loadInventory(config.inventoryFile);
+    let receipts = {};
+    if (config.controllerReceipt)
+      receipts = JSON.parse(fs.readFileSync(config.controllerReceipt, "utf8")).results ?? {};
+    config = {
+      ...config,
+      machines: inventory.targets.map((t) => {
+        const r = receipts[t.environmentId],
+          verified =
+            r?.status === "verified"
+              ? { releaseId: r.releaseId, sourceCommit: r.runtime?.sourceCommit, at: r.verifiedAt }
+              : t.verified;
+        return {
+          id: t.environmentId,
+          environmentId: t.environmentId,
+          label: t.name,
+          url: t.url,
+          availability: t.availability ?? "online",
+          desiredRelease: t.desired?.releaseId,
+          verifiedRelease: verified?.releaseId,
+          verifiedCommit: verified?.sourceCommit,
+          verifiedAt: verified?.at,
+          installedToolingCommit:
+            r?.status === "verified" ? r.toolingCommit : t.installedTooling?.commit,
+          offlineAlertMinutes: t.offlineAlertMinutes,
+        };
+      }),
+    };
+  }
   const now = new Date().toISOString();
   async function json(url) {
     const r = await fetcher(url, {signal: AbortSignal.timeout(8000), headers: {'User-Agent':'t3-code-ops'}});

@@ -42,7 +42,7 @@ export function run(command, args, options = {}) {
 export function verifyArchive(source) {
   const manifest = readJson(NodePath.join(source, "release.json"));
   if (
-    ![1,2].includes(manifest.schemaVersion) ||
+    ![1, 2].includes(manifest.schemaVersion) ||
     manifest.repository !== "https://github.com/nobody0/t3code" ||
     typeof manifest.version !== "string" ||
     !/^[0-9][0-9A-Za-z.+-]*$/.test(manifest.version) ||
@@ -149,28 +149,28 @@ export function installRelease(source, releasesRoot, command = run) {
   const platform = `${process.platform}-${process.arch}`;
   const lock = manifest.platformLocks?.[platform];
   if (manifest.schemaVersion !== 2 || !lock)
-    throw new Error(`A tested dependency lock for ${platform} is required; prepare this legacy artifact first.`);
-  for (const name of ['package.json','package-lock.json']) {
-    if (digest(NodePath.join(source,'locks',platform,name)) !== lock[name]) throw new Error('Dependency lock checksum mismatch.');
+    throw new Error(
+      `A tested dependency lock for ${platform} is required; prepare this legacy artifact first.`,
+    );
+  for (const name of ["package.json", "package-lock.json"]) {
+    if (digest(NodePath.join(source, "locks", platform, name)) !== lock[name])
+      throw new Error("Dependency lock checksum mismatch.");
   }
   NodeFS.mkdirSync(releasesRoot, { recursive: true });
   const target = NodePath.join(releasesRoot, manifest.releaseId);
   NodeFS.mkdirSync(target);
   for (const name of ["release.json", manifest.artifact])
     NodeFS.copyFileSync(NodePath.join(source, name), NodePath.join(target, name));
-  for (const name of ['package.json','package-lock.json'])
-    NodeFS.copyFileSync(NodePath.join(source,'locks',platform,name),NodePath.join(target,name));
-  command(
-    "npm",
-    [
-      "ci",
-      "--prefix",
-      target,
-      "--no-audit",
-      "--no-fund",
-    ],
-    { stdio: "inherit", timeout: 600_000 },
-  );
+  for (const name of ["package.json", "package-lock.json"])
+    NodeFS.copyFileSync(
+      NodePath.join(source, "locks", platform, name),
+      NodePath.join(target, name),
+    );
+  command("npm", ["ci", "--no-audit", "--no-fund"], {
+    cwd: target,
+    stdio: "inherit",
+    timeout: 600_000,
+  });
   const pkg = readJson(NodePath.join(target, "node_modules/t3/package.json"));
   if (pkg.name !== "t3" || pkg.version !== manifest.version)
     throw new Error("Installed package does not match the release.");

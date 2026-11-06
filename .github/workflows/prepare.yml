@@ -1,7 +1,7 @@
 name: Prepare stable T3 candidate
 on:
   schedule:
-    - cron: '17 */4 * * *'
+    - cron: "17 */4 * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: "24.22.1"
       - name: Configure fork repository access
         env:
           CANDIDATE_KEY: ${{ secrets.T3_FORK_DEPLOY_KEY }}
@@ -66,7 +66,7 @@ jobs:
           path: work/source
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: "24.22.1"
       - run: npm install -g corepack@0.35.0
       - run: node --test scripts/*.test.mjs
       - working-directory: work/source
@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: "24.22.1"
       - uses: actions/download-artifact@v4
         with:
           name: runtime
@@ -106,6 +106,22 @@ jobs:
         run: |
           node --test scripts/ko-node-pty.test.mjs scripts/ko-native-service.test.mjs
           node scripts/lock-platform.mjs "$(dirname "$(find work/download -name release.json -print -quit)")"
+      - name: Prepare disposable Linux user manager
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Require native lifecycle evidence
+        shell: bash
+        run: node scripts/native-evidence.mjs work/native-evidence/${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-evidence-${{ matrix.os }}
+          path: work/native-evidence/
       - uses: actions/upload-artifact@v4
         with:
           name: locks-${{ matrix.os }}
@@ -120,7 +136,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: "24.22.1"
       - uses: actions/download-artifact@v4
         with:
           name: preparation-report

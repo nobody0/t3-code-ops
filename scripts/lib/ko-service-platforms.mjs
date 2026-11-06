@@ -147,7 +147,7 @@ try {
       }
     }
   }
-  $stdout.Dispose(); $stderr.Dispose()
+  if ($started) { $child.Dispose() }
 }
 # A server exit, including a clean unexpected exit, asks Task Scheduler to recover.
 if ($result -eq 0) { exit 1 }
@@ -197,6 +197,8 @@ export function platformAdapter(c, { executePowerShell = powershell } = {}) {
     throw new Error(`Run ${c.platform} service management on that target platform.`);
   if ((c.platform ?? "linux") === "linux") {
     const ctl = (...args) => run("systemctl", ["--user", ...args, c.service]);
+    const unit = NodePath.join(c.unitDirectory, c.service),
+      override = NodePath.join(c.unitDirectory, `${c.service}.d/90-ko-fork.conf`);
     return {
       info: () => {
         const text = ctl("show", "--property=ActiveState,MainPID");
@@ -209,13 +211,34 @@ export function platformAdapter(c, { executePowerShell = powershell } = {}) {
       stop: () => ctl("stop"),
       suspend: () => {},
       resume: () => {},
+      capture: () => ({ definition: optionalFile(unit), override: optionalFile(override) }),
+      restore: (saved) => {
+        try {
+          ctl("stop");
+        } catch {}
+        writeFile(unit, saved.definition);
+        writeFile(override, saved.override ?? null);
+        run("systemctl", ["--user", "daemon-reload"]);
+        if (saved.definition !== null) ctl("start");
+        else {
+          try {
+            ctl("disable");
+          } catch {}
+        }
+      },
       install: (target) => {
         ensureSupervisor(c);
+        if (optionalFile(unit) === null)
+          writeFile(
+            unit,
+            `[Unit]\nDescription=T3 Code managed service\nConditionPathExists=!${NodePath.join(c.root, "service-stopped")}\n[Service]\nType=simple\nWorkingDirectory=${c.baseDir}\n[Install]\nWantedBy=default.target\n`,
+          );
         writeFile(
           NodePath.join(c.unitDirectory, `${c.service}.d/90-ko-fork.conf`),
           renderSystemdOverride(c, target),
         );
         run("systemctl", ["--user", "daemon-reload"]);
+        ctl("enable");
         ctl("restart");
       },
     };

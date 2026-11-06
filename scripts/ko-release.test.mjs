@@ -50,15 +50,29 @@ server.listen(Number(arg('--port')),'127.0.0.1');process.on('SIGTERM',()=>server
     preview: false,
     dirty: false,
   });
-  const platform=`${process.platform}-${process.arch}`;
-  const lockDir=NodePath.join(source,'locks',platform);
-  NodeFS.mkdirSync(lockDir,{recursive:true});
-  NodeFS.copyFileSync(NodePath.join(source,'t3-code.tgz'),NodePath.join(lockDir,'t3-code.tgz'));
-  atomicJson(NodePath.join(lockDir,'package.json'),{private:true,dependencies:{t3:'file:t3-code.tgz'}});
-  run('npm',['install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund'],{cwd:lockDir});
-  NodeFS.unlinkSync(NodePath.join(lockDir,'t3-code.tgz'));
-  const m=readJson(NodePath.join(source,'release.json'));
-  atomicJson(NodePath.join(source,'release.json'),{...m,platformLocks:{[platform]:Object.fromEntries(['package.json','package-lock.json'].map(f=>[f,digest(NodePath.join(lockDir,f))]))}});
+  const platform = `${process.platform}-${process.arch}`;
+  const lockDir = NodePath.join(source, "locks", platform);
+  NodeFS.mkdirSync(lockDir, { recursive: true });
+  NodeFS.copyFileSync(NodePath.join(source, "t3-code.tgz"), NodePath.join(lockDir, "t3-code.tgz"));
+  atomicJson(NodePath.join(lockDir, "package.json"), {
+    name: "t3-runtime-fixture",
+    version: "1.0.0",
+    private: true,
+    dependencies: { t3: "file:t3-code.tgz" },
+  });
+  run("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], {
+    cwd: lockDir,
+  });
+  NodeFS.unlinkSync(NodePath.join(lockDir, "t3-code.tgz"));
+  const m = readJson(NodePath.join(source, "release.json"));
+  atomicJson(NodePath.join(source, "release.json"), {
+    ...m,
+    platformLocks: {
+      [platform]: Object.fromEntries(
+        ["package.json", "package-lock.json"].map((f) => [f, digest(NodePath.join(lockDir, f))]),
+      ),
+    },
+  });
   return source;
 }
 function temp(t) {
@@ -224,6 +238,7 @@ NodeTest.test(
       baselineVersion: "0.0.40",
     };
     const cfg = NodePath.join(root, "config.json");
+    NodeFS.mkdirSync(c.baseDir, { recursive: true });
     atomicJson(cfg, c);
     NodeAssert.deepEqual(loadConfig(cfg), c);
     const releases = NodePath.join(c.root, "releases");

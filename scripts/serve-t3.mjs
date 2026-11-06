@@ -125,6 +125,17 @@ function inhibited(initial = false) {
   const journalFile = path.join(c.root, "activation.json");
   if (fs.existsSync(journalFile)) {
     const j = JSON.parse(fs.readFileSync(journalFile, "utf8"));
+    if (
+      initial &&
+      j.phase === "pending" &&
+      j.stage === "resuming-previous" &&
+      j.candidateStarted === false &&
+      (j.previous?.target ?? j.previous?.link) === target &&
+      fs.existsSync(path.join(c.root, "activation.lock")) &&
+      fs.readFileSync(path.join(c.root, "activation.lock"), "utf8").trim() === String(j.ownerPid) &&
+      alive(j.ownerPid)
+    )
+      return false;
     if (j.phase === "pending" && initial && j.releaseId === path.basename(target)) return false;
     if (!["active", "rolled-back"].includes(j.phase)) return true;
   }
@@ -232,7 +243,12 @@ try {
     }
     generation++;
     phase = "starting";
-    const env = { ...process.env, T3_KO_MANAGED: "1", T3CODE_HOME: c.baseDir };
+    const env = {
+      ...process.env,
+      T3_KO_MANAGED: "1",
+      T3CODE_HOME: c.baseDir,
+      T3_KO_MAINTENANCE_DIR: path.join(c.root, "maintenance"),
+    };
     delete env.T3_BOOT_SERVICE_UNIT;
     delete env.T3_SERVICE_LAUNCHER_CONTEXT;
     const output = ownLogs ? ["service.stdout.log", "service.stderr.log"].map(openAppLog) : null;

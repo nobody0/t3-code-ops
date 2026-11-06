@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { loadConfig, manage, status } from "./lib/ko-deployment.mjs";
+import { recoverPrestart } from "./lib/ko-recovery.mjs";
 
 const [operation, configPath, releaseId, extra] = process.argv.slice(2);
 if (
   !configPath ||
   extra ||
-  !["status", "activate", "rollback"].includes(operation) ||
+  !["status", "activate", "rollback", "recover-prestart"].includes(operation) ||
   (operation === "activate") !== Boolean(releaseId)
 ) {
   throw new Error(
@@ -14,6 +15,8 @@ if (
 }
 const config = loadConfig(configPath);
 if (operation === "status") console.log(JSON.stringify(status(config), null, 2));
+else if (operation === "recover-prestart")
+  console.log(JSON.stringify(await recoverPrestart(config)));
 else {
   await manage(config, operation, releaseId);
   console.log(`${operation} completed for ${config.service}`);

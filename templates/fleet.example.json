@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "name": "canary",
+      "environmentId": "00000000-0000-4000-8000-000000000001",
+      "platform": "linux",
+      "arch": "x64",
+      "ssh": "operator@device.example",
+      "node": "/usr/bin/node",
+      "root": "/home/operator/.local/share/t3-code-ko",
+      "url": "https://device.example/",
+      "availability": "online",
+      "expectedProviders": []
+    }
+  ]
+}

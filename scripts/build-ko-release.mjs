@@ -175,6 +175,7 @@ NodeFS.writeFileSync(
     {
       schemaVersion: 1,
       opsCommit,
+      maintenanceProtocol: NodeFS.existsSync(NodePath.join(root, "apps/server/src/KoMaintenance.ts")) ? 1 : 0,
       repository: "https://github.com/nobody0/t3code",
       commit,
       version,
