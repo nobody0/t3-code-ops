@@ -192,7 +192,7 @@ function powershell(script) {
     ).toString("base64"),
   ]);
 }
-export function platformAdapter(c) {
+export function platformAdapter(c, { executePowerShell = powershell } = {}) {
   if ((c.platform ?? "linux") !== process.platform)
     throw new Error(`Run ${c.platform} service management on that target platform.`);
   if ((c.platform ?? "linux") === "linux") {
@@ -322,7 +322,7 @@ export function platformAdapter(c) {
   function stop() {
     // The owner is normally the task's child; after a wrapper replacement it is the
     // supervisor that child adopted. Its token proves it before the wait.
-    powershell(
+    executePowerShell(
       `${getTask}${getChild}
       $ownedFile=${psQuote(NodePath.join(c.root, "service-runtime.json"))};
       if(Test-Path -LiteralPath $ownedFile){$owned=Get-Content -Raw -LiteralPath $ownedFile|ConvertFrom-Json;
@@ -330,7 +330,17 @@ export function platformAdapter(c) {
           $supervisor=Get-Process -Id $owned.pid -ErrorAction SilentlyContinue;
           try{Invoke-RestMethod -Method Post -Uri ($owned.controlOrigin+'/stop') -Headers @{Authorization=('Bearer '+$owned.token)} -TimeoutSec 2|Out-Null;if($supervisor){$supervisor.WaitForExit(10000)|Out-Null}}catch{}
         }
-      }; if($child -and -not $child.HasExited){ & taskkill.exe /PID $child.Id /T /F | Out-Null }; if($task){ Stop-ScheduledTask -TaskPath '\\' -TaskName ${task} };`,
+      }; if($child -and -not $child.HasExited){ & taskkill.exe /PID $child.Id /T /F | Out-Null };
+      if($task){
+        Stop-ScheduledTask -TaskPath '\\' -TaskName ${task};
+        $stopDeadline=[DateTime]::UtcNow.AddSeconds(15);
+        do{
+          $stopping=Get-ScheduledTask -TaskPath '\\' -TaskName ${task} -ErrorAction SilentlyContinue;
+          if(-not $stopping -or @('Running','Queued') -notcontains [string]$stopping.State){break};
+          if([DateTime]::UtcNow -ge $stopDeadline){throw 'Task Scheduler did not acknowledge the stopped task; replacement refused.'};
+          Start-Sleep -Milliseconds 100;
+        }while($true);
+      };`,
     );
   }
   function register(definition) {

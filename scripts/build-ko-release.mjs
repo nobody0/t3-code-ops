@@ -29,6 +29,7 @@ function run(command, args, cwd = root, capture = false, env = process.env) {
     cwd,
     env,
     encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
     stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
     shell: false,
   });

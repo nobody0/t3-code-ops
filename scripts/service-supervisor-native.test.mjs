@@ -109,7 +109,8 @@ test(
         } catch {}
         await delay(100);
       }
-      throw Error("fixture not ready");
+      const log = path.join(root, "service-supervisor.log");
+      throw Error("fixture not ready\n" + (fs.existsSync(log) ? fs.readFileSync(log, "utf8").slice(-4000) : "no supervisor log"));
     };
     await ready();
     const first = read();

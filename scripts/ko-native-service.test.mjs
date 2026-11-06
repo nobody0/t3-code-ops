@@ -107,6 +107,34 @@ NodeTest.test(
     NodeAssert.match(script, /Bob''s home/);
   },
 );
+NodeTest.test(
+  "Windows stop waits for Task Scheduler to acknowledge a stopped task",
+  { skip: process.platform !== "win32" },
+  (t) => {
+    const { c } = setup(t);
+    let observed;
+    const adapter = platformAdapter(c, {
+      executePowerShell: (script) => {
+        const fixture = `
+          $script:stopRequested=$false; $script:pendingReads=3; $script:state='Running';
+          function Get-ScheduledTask {
+            if($script:stopRequested -and --$script:pendingReads -le 0){$script:state='Ready'}
+            [pscustomobject]@{State=$script:state}
+          }
+          function Stop-ScheduledTask {$script:stopRequested=$true}
+          ${script}
+          @{state=$script:state;stopRequested=$script:stopRequested}|ConvertTo-Json -Compress
+        `;
+        observed = JSON.parse(run("powershell.exe", [
+          "-NoProfile", "-NonInteractive", "-EncodedCommand",
+          Buffer.from(fixture, "utf16le").toString("base64"),
+        ]));
+      },
+    });
+    adapter.stop();
+    NodeAssert.deepEqual(observed, { state: "Ready", stopRequested: true });
+  },
+);
 NodeTest.test("first installation rejects occupied port before changing any service", async (t) => {
   const { c, releaseId } = setup(t);
   let changed = false;
