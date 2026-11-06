@@ -117,12 +117,9 @@ function inhibited(initial = false) {
       fs.existsSync(lock) &&
       fs.readFileSync(lock, "utf8").trim() === String(claim.ownerPid)
     ) {
-      try {
-        process.kill(claim.ownerPid, 0);
-        return false;
-      } catch {
-        /* stale installer */
-      }
+      // A limited Windows task can see EPERM for its elevated installer.
+      // Treat that as alive, as the adoption path already does.
+      if (alive(claim.ownerPid)) return false;
     }
   }
   const journalFile = path.join(c.root, "activation.json");

@@ -344,11 +344,8 @@ export function platformAdapter(c, { executePowerShell = powershell } = {}) {
     );
   }
   function register(definition) {
-    executePowerShell(
-      // A failed adopted wrapper can leave a delayed restart even after State is Ready.
-      // Replace its registration so IgnoreNew cannot discard the replacement start.
-      `${getTask} if($task){Unregister-ScheduledTask -TaskPath '\\' -TaskName ${task} -Confirm:$false};
-      Register-ScheduledTask -TaskPath '\\' -TaskName ${task} -Xml ${psQuote(definition)} -Force | Out-Null; Start-ScheduledTask -TaskPath '\\' -TaskName ${task}`,
+    powershell(
+      `Register-ScheduledTask -TaskPath '\\' -TaskName ${task} -Xml ${psQuote(definition)} -Force | Out-Null; Start-ScheduledTask -TaskPath '\\' -TaskName ${task}`,
     );
   }
   return {

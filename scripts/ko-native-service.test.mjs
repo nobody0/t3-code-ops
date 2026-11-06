@@ -135,35 +135,6 @@ NodeTest.test(
     NodeAssert.deepEqual(observed, { state: "Ready", stopRequested: true });
   },
 );
-NodeTest.test(
-  "Windows replacement clears a stopped task's pending failure restart before starting",
-  { skip: process.platform !== "win32" },
-  (t) => {
-    const { c } = setup(t);
-    let observed;
-    const adapter = platformAdapter(c, {
-      executePowerShell: (script) => {
-        const fixture = `
-          $script:exists=$true; $script:pendingRestart=$true;
-          $script:started=$false; $script:unregistered=$false;
-          function Get-ScheduledTask {if($script:exists){[pscustomobject]@{State='Ready'}}}
-          function Stop-ScheduledTask {}
-          function Unregister-ScheduledTask {$script:exists=$false;$script:pendingRestart=$false;$script:unregistered=$true}
-          function Register-ScheduledTask {$script:exists=$true}
-          function Start-ScheduledTask {if(-not $script:pendingRestart){$script:started=$true}}
-          ${script}
-          @{started=$script:started;unregistered=$script:unregistered}|ConvertTo-Json -Compress
-        `;
-        observed = JSON.parse(run("powershell.exe", [
-          "-NoProfile", "-NonInteractive", "-EncodedCommand",
-          Buffer.from(fixture, "utf16le").toString("base64"),
-        ]));
-      },
-    });
-    adapter.restore({ definition: "<Task/>", script: "fixture" });
-    NodeAssert.deepEqual(observed, { started: true, unregistered: true });
-  },
-);
 NodeTest.test("first installation rejects occupied port before changing any service", async (t) => {
   const { c, releaseId } = setup(t);
   let changed = false;
